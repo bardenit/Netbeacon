@@ -24,6 +24,7 @@ interface Edge {
   source_port?: string;
   target_port?: string;
   remote_system_name?: string;
+  down?: boolean;
 }
 
 interface TopologyData {
@@ -178,8 +179,9 @@ export default function TopologyView({ apiFetch, onJumpToFaceplate }: {
       id: e.id,
       from: e.source_device_id,
       to: e.target_device_id,
-      color: { color: '#4f8ef7', opacity: 0.6 },
-      width: 2,
+      color: e.down ? { color: '#ef4444', opacity: 0.9 } : { color: '#4f8ef7', opacity: 0.6 },
+      dashes: e.down ? [6, 6] : false,
+      width: e.down ? 2.5 : 2,
       smooth: false
     }));
 

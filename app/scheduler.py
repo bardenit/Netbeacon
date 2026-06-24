@@ -441,11 +441,32 @@ def _persist_result(device_id: int, result: CollectorResult):
 
 
 def _prune_stale_data():
-    """Remove data not seen in the last 2 hours (global)."""
+    """Remove data not seen in the last 2 hours (global).
+
+    Neighbor rows that touch a currently-down device (poll_status == 'error')
+    are preserved so the topology keeps the dead switch's last-known links
+    (drawn red) instead of dropping it out of the graph.
+    """
     cutoff = datetime.utcnow() - timedelta(hours=2)
     stat_cutoff = datetime.utcnow() - timedelta(hours=48)
     with SessionLocal() as db:
-        db.query(Neighbor).filter(Neighbor.last_seen < cutoff).delete()
+        down_ids: set[int] = set()
+        down_names: set[str] = set()
+        for d in db.query(Device).all():
+            if d.poll_status == "error":
+                down_ids.add(d.id)
+                if d.hostname:
+                    down_names.add(d.hostname.lower())
+                if d.snmp_name:
+                    down_names.add(d.snmp_name.lower())
+
+        for n in db.query(Neighbor).filter(Neighbor.last_seen < cutoff).all():
+            if n.local_device_id in down_ids:
+                continue  # keep the down switch's own last-known links
+            if (n.remote_system_name or "").lower() in down_names:
+                continue  # keep the upstream link pointing at the down switch
+            db.delete(n)
+
         db.query(MacEntry).filter(MacEntry.last_seen < cutoff).delete()
         db.query(PortStat).filter(PortStat.sampled_at < stat_cutoff).delete()
         db.commit()

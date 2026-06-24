@@ -61,9 +61,24 @@ def update_device(device_id: int, payload: DeviceUpdate, db: Session = Depends(g
 
 @router.delete("/{device_id}", status_code=204)
 def delete_device(device_id: int, db: Session = Depends(get_db)):
+    from sqlalchemy import func
+    from app.models import Neighbor
+
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
+
+    # Suppress phantom resurrection: drop this device's own LLDP rows and any
+    # rows on other switches that advertise it by name, so a deleted switch
+    # doesn't reappear as an unmanaged phantom node in the topology.
+    names = {n.lower() for n in (device.hostname, device.snmp_name) if n}
+    db.query(Neighbor).filter(Neighbor.local_device_id == device_id).delete(
+        synchronize_session=False)
+    if names:
+        db.query(Neighbor).filter(
+            func.lower(Neighbor.remote_system_name).in_(names)
+        ).delete(synchronize_session=False)
+
     db.delete(device)
     db.commit()
     logger.info("Deleted device %d", device_id)

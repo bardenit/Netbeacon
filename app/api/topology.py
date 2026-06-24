@@ -167,6 +167,12 @@ def get_topology(db: Session = Depends(get_db)):
         filtered.append(e)
     edges = filtered
 
+    # Flag edges touching a down device so the UI can keep them drawn in red
+    down_ids = {d.id for d in devices if d.poll_status == "error"}
+    for e in edges:
+        if e.source_device_id in down_ids or e.target_device_id in down_ids:
+            e.down = True
+
     # Prune phantom nodes orphaned by edge filtering (managed nodes always kept)
     referenced = {e.source_device_id for e in edges} | {e.target_device_id for e in edges}
     nodes = [n for n in nodes if n.id >= 0 or n.id in referenced]

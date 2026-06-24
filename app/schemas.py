@@ -177,6 +177,7 @@ class TopologyEdge(BaseModel):
     source_port: Optional[str] = None
     target_port: Optional[str] = None
     remote_system_name: Optional[str] = None
+    down: bool = False
 
 
 class TopologyGraph(BaseModel):
