@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["topology"])
 
 
+def _norm_port(name: str | None) -> str:
+    return (name or "").strip().lower()
+
+
 @router.get("/topology", response_model=TopologyGraph)
 def get_topology(db: Session = Depends(get_db)):
     devices = db.query(Device).all()
@@ -143,6 +147,29 @@ def get_topology(db: Session = Depends(get_db)):
             target_port=neighbor.remote_port_id,
             remote_system_name=remote_name,
         ))
+
+    # ── Drop leaked/transitive LLDP edges ───────────────────────────────────
+    # A physical port connects to exactly one neighbor. Build the set of ports
+    # that have a first-hand LLDP report (i.e. are the *source* of an edge).
+    # If another edge merely *claims* a link to that same (device, port) but
+    # names a different peer, that claim is a forwarded/leaked LLDP frame —
+    # the port's own first-hand report wins, so the claim is dropped.
+    first_hand: dict[tuple[int, str], int] = {}
+    for e in edges:
+        if e.source_port:
+            first_hand[(e.source_device_id, _norm_port(e.source_port))] = e.target_device_id
+
+    filtered: list[TopologyEdge] = []
+    for e in edges:
+        owner = first_hand.get((e.target_device_id, _norm_port(e.target_port)))
+        if e.target_port and owner is not None and owner != e.source_device_id:
+            continue  # target device's own port points elsewhere → leaked claim
+        filtered.append(e)
+    edges = filtered
+
+    # Prune phantom nodes orphaned by edge filtering (managed nodes always kept)
+    referenced = {e.source_device_id for e in edges} | {e.target_device_id for e in edges}
+    nodes = [n for n in nodes if n.id >= 0 or n.id in referenced]
 
     return TopologyGraph(nodes=nodes, edges=edges)
 
