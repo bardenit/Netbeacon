@@ -1,0 +1,32 @@
+services:
+  app:
+    build: .
+    image: jbarden75/netbeacon:latest
+    ports:
+      - "80:8080"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    environment:
+      - POLL_INTERVAL_MINUTES=5
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN       # entrypoint: chown bind mounts to netbeacon
+      - SETUID      # gosu: drop from root to netbeacon
+      - SETGID      # gosu: drop group
+      - DAC_OVERRIDE  # root file access on host-owned bind mounts
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
