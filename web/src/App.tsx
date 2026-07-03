@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Network,
   Search,
@@ -23,6 +23,7 @@ import DashboardView from './views/DashboardView';
 import EventsView from './views/EventsView';
 import SettingsView from './views/SettingsView';
 import MacNamesView from './views/MacNamesView';
+import SidebarOverlay from './components/SidebarOverlay';
 import { SubnetDef } from './utils';
 
 export interface LabelEntry {
@@ -31,16 +32,6 @@ export interface LabelEntry {
   vendor?: string | null;
   label: string;
   notes?: string | null;
-}
-
-// Types (subset of what we need)
-interface Device {
-  id: number;
-  hostname: string;
-  ip_address: string;
-  vendor?: string;
-  poll_status: string;
-  last_polled?: string;
 }
 
 export default function App() {
@@ -128,7 +119,7 @@ export default function App() {
     }
   };
 
-  const apiFetch = async (url: string, options: any = {}) => {
+  const apiFetch = useCallback(async (url: string, options: any = {}) => {
     const authOptions = {
       ...options,
       headers: {
@@ -148,7 +139,7 @@ export default function App() {
       throw new Error("Session expired");
     }
     return res;
-  };
+  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchStatus = async () => {
     try {
@@ -363,25 +354,5 @@ function IconButton({ onClick, icon, badge }: any) {
         </span>
       )}
     </button>
-  );
-}
-
-function SidebarOverlay({ isOpen, onClose, title, children, width = 'w-[480px]' }: any) {
-  if (!isOpen) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex">
-      <div className="flex-1 bg-black/50" onClick={onClose} />
-      <div className={`${width} bg-surface border-l border-border flex flex-col h-full shadow-2xl`}>
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border flex-shrink-0">
-          <h2 className="font-semibold text-white text-sm">{title}</h2>
-          <button onClick={onClose} className="p-1.5 text-text2 hover:text-white hover:bg-surface2 rounded-md transition-all">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto">
-          {children}
-        </div>
-      </div>
-    </div>
   );
 }

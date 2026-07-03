@@ -85,7 +85,7 @@ class Neighbor(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     local_device_id = Column(Integer, ForeignKey("devices.id"), nullable=False, index=True)
-    local_port_id = Column(Integer, ForeignKey("ports.id"), nullable=True)
+    local_port_id = Column(Integer, ForeignKey("ports.id"), nullable=True, index=True)
     local_port_index = Column(Integer, nullable=True)  # raw ifIndex, populated before port lookup
     remote_chassis_id = Column(String, nullable=True)
     remote_port_id = Column(String, nullable=True)
@@ -115,7 +115,7 @@ class PortVlan(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     port_id = Column(Integer, ForeignKey("ports.id"), nullable=False, index=True)
-    vlan_id = Column(Integer, ForeignKey("vlans.id"), nullable=False)
+    vlan_id = Column(Integer, ForeignKey("vlans.id"), nullable=False, index=True)
     tagged = Column(Boolean, default=True)
     last_seen = Column(DateTime, default=datetime.utcnow)
 

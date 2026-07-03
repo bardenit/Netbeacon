@@ -84,25 +84,6 @@ def delete_device(device_id: int, db: Session = Depends(get_db)):
     logger.info("Deleted device %d", device_id)
 
 
-@router.post("/{device_id}/gateway", response_model=DeviceOut)
-def set_gateway(device_id: int, db: Session = Depends(get_db)):
-    """Toggle this device as the gateway switch (clears the flag on all others first)."""
-    device = db.get(Device, device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    # If already gateway, just clear it; otherwise set only this one within the same site
-    if device.is_gateway:
-        device.is_gateway = False
-    else:
-        # Clear only devices in the same site (or same "no site" group)
-        q = db.query(Device).filter(Device.site == device.site)
-        q.update({Device.is_gateway: False})
-        device.is_gateway = True
-    db.commit()
-    db.refresh(device)
-    return _device_out(device)
-
-
 @router.post("/{device_id}/poll", status_code=202)
 async def trigger_device_poll(device_id: int, db: Session = Depends(get_db)):
     device = db.get(Device, device_id)
@@ -119,7 +100,11 @@ def get_device_ports(device_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Device not found")
 
     ports_out = []
-    from app.models import Neighbor, MacEntry as ME
+    from app.models import Neighbor
+    neighbors_by_port = {
+        n.local_port_id: n
+        for n in db.query(Neighbor).filter(Neighbor.local_device_id == device_id).all()
+    }
     for port in sorted(device.ports, key=lambda p: p.port_index):
         vlans = []
         for pv in port.port_vlans:
@@ -130,10 +115,7 @@ def get_device_ports(device_id: int, db: Session = Depends(get_db)):
                     "tagged": pv.tagged,
                 })
 
-        neighbor = db.query(Neighbor).filter(
-            Neighbor.local_device_id == device_id,
-            Neighbor.local_port_id == port.id,
-        ).first()
+        neighbor = neighbors_by_port.get(port.id)
 
         ports_out.append({
             "id": port.id,
@@ -304,12 +286,17 @@ def get_device_fdb(device_id: int, db: Session = Depends(get_db)):
     from app.models import MacEntry, ArpEntry
     entries = db.query(MacEntry).filter(MacEntry.device_id == device_id).all()
 
-    # Cross-reference ARP for IPs
+    # Cross-reference ARP for IPs: one query, newest entry wins per MAC
+    arp_by_mac: dict[str, ArpEntry] = {}
+    if entries:
+        for a in db.query(ArpEntry).filter(
+            ArpEntry.mac_address.in_({e.mac_address for e in entries})
+        ).order_by(ArpEntry.last_seen.asc()).all():
+            arp_by_mac[a.mac_address] = a
+
     result = []
     for entry in entries:
-        arp = db.query(ArpEntry).filter(
-            ArpEntry.mac_address == entry.mac_address
-        ).order_by(ArpEntry.last_seen.desc()).first()
+        arp = arp_by_mac.get(entry.mac_address)
         result.append({
             "mac_address": entry.mac_address,
             "port_id": entry.port_id,

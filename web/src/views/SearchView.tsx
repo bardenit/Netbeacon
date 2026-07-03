@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, type ReactNode } from 'react';
 import { Search as SearchIcon, MapPin, ArrowRight, Activity, Zap, ExternalLink, RefreshCw, Tag } from 'lucide-react';
 import { Network as VisNetwork, DataSet } from 'vis-network/standalone';
 import NetworkBadge from '../components/NetworkBadge';
-import { SubnetDef } from '../utils';
+import { SubnetDef, formatIsoDate } from '../utils';
 import { LabelEntry } from '../App';
 
 interface SearchResult {
@@ -278,9 +278,9 @@ export default function SearchView({ onJumpToFaceplate, topologyData, apiFetch, 
               </div>
 
               <div className="divide-y divide-border">
-                {group.results.map((item, i) => (
-                  <div 
-                    key={i} 
+                {group.results.map((item) => (
+                  <div
+                    key={`${item.mac_address}-${item.port_index}`}
                     onClick={() => setSelectedResult({ group, item })}
                     className={`px-4 py-3 flex items-center gap-4 cursor-pointer hover:bg-surface2 transition-colors ${
                       selectedResult?.item === item ? 'bg-accent/5 border-l-2 border-accent' : ''
@@ -311,7 +311,7 @@ export default function SearchView({ onJumpToFaceplate, topologyData, apiFetch, 
                       <div className="flex items-center gap-2 text-[10px] text-text2">
                         {item.ip_address && <span className="flex items-center text-text">{item.ip_address}<NetworkBadge ip={item.ip_address} subnets={subnets} /></span>}
                         {item.vlan_id && <span>· VLAN {item.vlan_id}</span>}
-                        {item.last_seen && <span>· Seen {new Date(item.last_seen + 'Z').toLocaleDateString()}</span>}
+                        {item.last_seen && <span>· Seen {formatIsoDate(item.last_seen, 'date')}</span>}
                         {item._seenOn && item._seenOn > 1 && <span className="text-accent2">· Visible on {item._seenOn} switches</span>}
                       </div>
                     </div>

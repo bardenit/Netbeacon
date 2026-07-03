@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { RefreshCw, Info, Cpu, Activity, Tag } from 'lucide-react';
-import { formatSpeed, formatBytes, SubnetDef } from '../utils';
+import { formatSpeed, formatBytes, formatIsoDate, SubnetDef } from '../utils';
 import NetworkBadge from '../components/NetworkBadge';
 import { LabelEntry } from '../App';
 
@@ -258,7 +258,7 @@ export default function FaceplateView({ initialParams, onParamsConsumed, apiFetc
               <div className="flex items-center gap-1.5"><Activity className="w-3.5 h-3.5" /> IP: <span className="flex items-center text-text font-medium">{selectedDevice.ip_address}<NetworkBadge ip={selectedDevice.ip_address} subnets={subnets} /></span></div>
               <div className="flex items-center gap-1.5"><Cpu className="w-3.5 h-3.5" /> Vendor: <span className="text-text font-medium">{selectedDevice.vendor || '—'}</span></div>
               <div className="flex items-center gap-1.5"><Info className="w-3.5 h-3.5" /> Model: <span className="text-text font-medium">{selectedDevice.model || '—'}</span></div>
-              <div className="flex items-center gap-1.5">Last Polled: <span className="text-text font-medium">{selectedDevice.last_polled ? new Date(selectedDevice.last_polled + 'Z').toLocaleString() : 'Never'}</span></div>
+              <div className="flex items-center gap-1.5">Last Polled: <span className="text-text font-medium">{selectedDevice.last_polled ? formatIsoDate(selectedDevice.last_polled, 'datetime') : 'Never'}</span></div>
               <div className="flex items-center gap-1.5">Status: <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
                 selectedDevice.poll_status === 'ok' ? 'bg-green/20 text-green' : 'bg-red/20 text-red'
               }`}>{selectedDevice.poll_status}</span></div>
@@ -410,7 +410,7 @@ export default function FaceplateView({ initialParams, onParamsConsumed, apiFetc
                     {selectedPort.flap_count != null && selectedPort.flap_count > 0 && (
                       <div className="flex items-center gap-2 px-2 py-1.5 bg-yellow/10 border border-yellow/20 rounded text-[11px]">
                         <span className="text-yellow font-bold">⚡ {selectedPort.flap_count} link flap{selectedPort.flap_count !== 1 ? 's' : ''}</span>
-                        {selectedPort.last_flap_at && <span className="text-text2">· {new Date(selectedPort.last_flap_at + 'Z').toLocaleString()}</span>}
+                        {selectedPort.last_flap_at && <span className="text-text2">· {formatIsoDate(selectedPort.last_flap_at, 'datetime')}</span>}
                       </div>
                     )}
                     {selectedPort.poe_draw_mw != null && selectedPort.poe_draw_mw > 0 && (
@@ -422,7 +422,7 @@ export default function FaceplateView({ initialParams, onParamsConsumed, apiFetc
                         <div className="font-mono text-[11px] text-text">{selectedPort.last_mac}</div>
                         {selectedPort.last_hostname && <div className="text-[11px] text-accent italic">{selectedPort.last_hostname}</div>}
                         {selectedPort.last_ip && <div className="flex items-center text-[11px] text-text2">{selectedPort.last_ip}<NetworkBadge ip={selectedPort.last_ip} subnets={subnets} /></div>}
-                        {selectedPort.last_connection_at && <div className="text-[10px] text-text2/60">Last seen: {new Date(selectedPort.last_connection_at + 'Z').toLocaleDateString()}</div>}
+                        {selectedPort.last_connection_at && <div className="text-[10px] text-text2/60">Last seen: {formatIsoDate(selectedPort.last_connection_at, 'date')}</div>}
                       </div>
                     )}
                     <div className="space-y-1">
@@ -506,13 +506,13 @@ export default function FaceplateView({ initialParams, onParamsConsumed, apiFetc
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border/50">
-                        {macHistory.map((m, i) => (
-                          <tr key={i} className="hover:bg-accent/5">
+                        {macHistory.map((m) => (
+                          <tr key={`${m.mac_address}-${m.last_seen}`} className="hover:bg-accent/5">
                             <td className="py-1.5 font-mono text-text pr-4">{m.mac_address}</td>
                             <td className="py-1.5 text-text2 pr-4">{m.vendor || '—'}</td>
                             <td className="py-1.5 text-accent pr-4"><span className="flex items-center">{m.ip_address || '—'}<NetworkBadge ip={m.ip_address} subnets={subnets} /></span></td>
                             <td className="py-1.5 text-white pr-4">{m.hostname || '—'}</td>
-                            <td className="py-1.5 text-text2">{new Date(m.last_seen + 'Z').toLocaleString()}</td>
+                            <td className="py-1.5 text-text2">{formatIsoDate(m.last_seen, 'datetime')}</td>
                           </tr>
                         ))}
                       </tbody>

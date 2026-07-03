@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import secrets
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -16,36 +14,14 @@ from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHas
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.crypto import load_or_create_secret_key
 from app.database import get_db
 from app.models import User
 
 logger = logging.getLogger(__name__)
 
 # ── Secret key: env var takes priority; otherwise auto-generate and persist ────
-_KEY_FILE = "/app/data/secret_key"
-
-
-def _load_or_create_secret_key() -> str:
-    env_key = os.environ.get("SECRET_KEY", "").strip()
-    if env_key:
-        return env_key
-    try:
-        with open(_KEY_FILE) as f:
-            key = f.read().strip()
-            if key:
-                return key
-    except FileNotFoundError:
-        pass
-    key = secrets.token_hex(32)
-    os.makedirs(os.path.dirname(_KEY_FILE), exist_ok=True)
-    with open(_KEY_FILE, "w") as f:
-        f.write(key)
-    os.chmod(_KEY_FILE, 0o600)
-    logger.info("Generated new JWT secret key and persisted to %s", _KEY_FILE)
-    return key
-
-
-SECRET_KEY = _load_or_create_secret_key()
+SECRET_KEY = load_or_create_secret_key()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 2  # 2 days (down from 7)
 

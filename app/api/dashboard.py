@@ -15,6 +15,25 @@ from app.models import ArpEntry, Device, MacEntry, Neighbor, Port, PortStat, Sub
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
+def _managed_names(db: Session) -> set[str]:
+    """Lowercased hostnames + SNMP names of all managed devices."""
+    names: set[str] = set()
+    for dev in db.query(Device).all():
+        names.add(dev.hostname.lower())
+        if dev.snmp_name:
+            names.add(dev.snmp_name.lower())
+    return names
+
+
+def _trunk_port_ids(db: Session, managed_names: set[str]) -> set[int]:
+    """Port IDs whose LLDP neighbor is a managed switch (i.e. trunk/uplink ports)."""
+    return {
+        n.local_port_id
+        for n in db.query(Neighbor).filter(Neighbor.local_port_id.isnot(None)).all()
+        if n.remote_system_name and n.remote_system_name.lower() in managed_names
+    }
+
+
 @router.get("/summary")
 def get_summary(db: Session = Depends(get_db)):
     """Return high-level network statistics."""
@@ -96,19 +115,7 @@ def vlan_explorer(db: Session = Depends(get_db)):
 @router.get("/utilization")
 def port_utilization(db: Session = Depends(get_db)):
     """Return top 20 non-trunk ports sorted by total bytes (rx+tx)."""
-    from app.models import Neighbor
-
-    # Build trunk port ID set: ports with an LLDP neighbor pointing to a managed switch
-    managed_names: set[str] = set()
-    for dev in db.query(Device).all():
-        managed_names.add(dev.hostname.lower())
-        if dev.snmp_name:
-            managed_names.add(dev.snmp_name.lower())
-
-    trunk_port_ids: set[int] = set()
-    for n in db.query(Neighbor).filter(Neighbor.local_port_id.isnot(None)).all():
-        if n.remote_system_name and n.remote_system_name.lower() in managed_names:
-            trunk_port_ids.add(n.local_port_id)
+    trunk_port_ids = _trunk_port_ids(db, _managed_names(db))
 
     rows = (
         db.query(Port, Device)
@@ -151,7 +158,6 @@ def port_utilization(db: Session = Depends(get_db)):
 @router.get("/new-devices")
 def new_devices(hours: int = Query(default=24, ge=1, le=8760), db: Session = Depends(get_db)):
     """Return MAC addresses first seen within the last N hours, deduplicated to access port."""
-    from app.models import Neighbor
     from app.oui import lookup_vendor
     from sqlalchemy import func as sqlfunc
 
@@ -166,18 +172,8 @@ def new_devices(hours: int = Query(default=24, ge=1, le=8760), db: Session = Dep
         .all()
     )
 
-    # Build set of managed switch names for trunk detection (same logic as SearchView)
-    managed_names: set[str] = set()
-    for dev in db.query(Device).all():
-        managed_names.add(dev.hostname.lower())
-        if dev.snmp_name:
-            managed_names.add(dev.snmp_name.lower())
-
-    # Identify trunk ports: ports that have an LLDP neighbor pointing to a managed switch
-    trunk_port_ids: set[int] = set()
-    for n in db.query(Neighbor).filter(Neighbor.local_port_id.isnot(None)).all():
-        if n.remote_system_name and n.remote_system_name.lower() in managed_names:
-            trunk_port_ids.add(n.local_port_id)
+    # Trunk ports: LLDP neighbor points to a managed switch (same logic as SearchView)
+    trunk_port_ids = _trunk_port_ids(db, _managed_names(db))
 
     # Count MACs per port in one query
     mac_counts: dict[int, int] = {
@@ -193,12 +189,11 @@ def new_devices(hours: int = Query(default=24, ge=1, le=8760), db: Session = Dep
     for mac_entry, device, port in entries:
         by_mac.setdefault(mac_entry.mac_address, []).append((mac_entry, device, port))
 
-    # ARP lookup cache
+    # ARP lookup cache — one batched query for all matched MACs
     arp_cache: dict[str, ArpEntry] = {}
-    for mac, candidates in by_mac.items():
-        arp = db.query(ArpEntry).filter(ArpEntry.mac_address == mac).first()
-        if arp:
-            arp_cache[mac] = arp
+    if by_mac:
+        for arp in db.query(ArpEntry).filter(ArpEntry.mac_address.in_(by_mac.keys())).all():
+            arp_cache.setdefault(arp.mac_address, arp)
 
     result = []
     for mac, candidates in by_mac.items():
@@ -477,15 +472,20 @@ def ip_conflicts(db: Session = Depends(get_db)):
         .having(sqlfunc.count(ArpEntry.mac_address) > 1)
         .all()
     )
+    dupe_ips = {ip for ip, _ in dupes}
+    entries_by_ip: dict[str, list[ArpEntry]] = {}
+    if dupe_ips:
+        for e in db.query(ArpEntry).filter(ArpEntry.ip_address.in_(dupe_ips)).all():
+            entries_by_ip.setdefault(e.ip_address, []).append(e)
+
     result = []
     for ip, count in dupes:
-        entries = db.query(ArpEntry).filter(ArpEntry.ip_address == ip).all()
         result.append({
             "ip_address": ip,
             "mac_count": count,
             "entries": [
                 {"mac_address": e.mac_address, "hostname": e.hostname, "last_seen": e.last_seen}
-                for e in entries
+                for e in entries_by_ip.get(ip, [])
             ],
         })
     result.sort(key=lambda x: x["ip_address"])
@@ -503,14 +503,20 @@ def vlan_gaps(db: Session = Depends(get_db)):
     for d in devices:
         site_devices[d.site or "Default"].append(d)
 
+    # One query: VLAN IDs and names per device
+    vlans_by_device: dict[int, set[int]] = defaultdict(set)
+    vlan_name_by_device: dict[int, dict[int, str]] = defaultdict(dict)
+    for v in db.query(Vlan).all():
+        vlans_by_device[v.device_id].add(v.vlan_id)
+        if v.vlan_name:
+            vlan_name_by_device[v.device_id].setdefault(v.vlan_id, v.vlan_name)
+
     result = []
     for site, site_devs in site_devices.items():
         if len(site_devs) < 2:
             continue
 
-        dev_vlans: dict[int, set[int]] = {}
-        for d in site_devs:
-            dev_vlans[d.id] = {v.vlan_id for v in db.query(Vlan).filter(Vlan.device_id == d.id).all()}
+        dev_vlans: dict[int, set[int]] = {d.id: vlans_by_device.get(d.id, set()) for d in site_devs}
 
         all_vlans = set().union(*dev_vlans.values())
 
@@ -525,13 +531,14 @@ def vlan_gaps(db: Session = Depends(get_db)):
                 if vlan_id not in dev_vlans[d.id]
             ]
             if missing_from:
-                vlan_obj = db.query(Vlan).filter(
-                    Vlan.vlan_id == vlan_id,
-                    Vlan.device_id.in_([d.id for d in site_devs])
-                ).first()
+                vlan_name = next(
+                    (vlan_name_by_device[d.id][vlan_id]
+                     for d in site_devs if vlan_id in vlan_name_by_device[d.id]),
+                    None,
+                )
                 gaps.append({
                     "vlan_id": vlan_id,
-                    "vlan_name": vlan_obj.vlan_name if vlan_obj else None,
+                    "vlan_name": vlan_name,
                     "missing_from": missing_from,
                     "present_on": len(site_devs) - len(missing_from),
                     "total_switches": len(site_devs),
@@ -557,6 +564,15 @@ def site_summary(db: Session = Depends(get_db)):
 
     yesterday = datetime.utcnow() - timedelta(hours=24)
 
+    # New MACs per device in one grouped query
+    from sqlalchemy import func as sqlfunc
+    new_by_device: dict[int, int] = dict(
+        db.query(MacEntry.device_id, sqlfunc.count(MacEntry.id))
+        .filter(MacEntry.first_seen >= yesterday)
+        .group_by(MacEntry.device_id)
+        .all()
+    )
+
     for d in devices:
         site = d.site or "Default"
         s = site_map[site]
@@ -573,11 +589,7 @@ def site_summary(db: Session = Depends(get_db)):
             if (p.flap_count or 0) > 0:
                 s["flapping_ports"] += 1
 
-        new_count = db.query(MacEntry).filter(
-            MacEntry.device_id == d.id,
-            MacEntry.first_seen >= yesterday
-        ).count()
-        s["new_devices_24h"] += new_count
+        s["new_devices_24h"] += new_by_device.get(d.id, 0)
 
     return sorted(site_map.values(), key=lambda x: x["site"])
 

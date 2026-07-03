@@ -17,6 +17,14 @@ export function formatBytes(bytes: number | null): string {
   return `${val.toFixed(1)} ${units[unitIdx]}`;
 }
 
+export function formatIsoDate(iso: string | null | undefined, style: 'datetime' | 'time' | 'date'): string {
+  if (!iso) return '—';
+  const d = new Date(iso + 'Z');
+  if (style === 'time') return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (style === 'date') return d.toLocaleDateString();
+  return d.toLocaleString();
+}
+
 export interface SubnetDef { cidr: string; name: string | null }
 
 function ipToNum(ip: string): number {

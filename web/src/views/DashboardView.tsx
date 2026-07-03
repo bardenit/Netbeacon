@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Layers, Activity, Search, ArrowUp, ArrowDown, ChevronRight, ChevronDown,
-  Server, Network, Hash, Zap, AlertCircle, Shield, Wifi, Globe,
+  Server, Network, Hash, Zap, AlertCircle, Shield, Globe,
   TrendingUp, Clock, AlertTriangle, XCircle, GitMerge, MapPin, Moon
 } from 'lucide-react';
-import { formatBytes, SubnetDef } from '../utils';
+import { formatBytes, formatIsoDate, SubnetDef } from '../utils';
 import NetworkBadge from '../components/NetworkBadge';
 
 interface Summary {
@@ -295,8 +295,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {newDevices.map((d, i) => (
-                    <tr key={i} className="hover:bg-accent/5 transition-colors">
+                  {newDevices.map((d) => (
+                    <tr key={d.mac_address} className="hover:bg-accent/5 transition-colors">
                       <td className="px-4 py-3 font-mono text-xs text-white">{d.mac_address}</td>
                       <td className="px-4 py-3 text-xs text-text2">{d.vendor || '—'}</td>
                       <td className="px-4 py-3 text-xs">
@@ -313,7 +313,7 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                           <span className="text-text2"> · {d.port_name || '?'}</span>
                         </button>
                       </td>
-                      <td className="px-4 py-3 text-xs text-text2">{new Date(d.first_seen + 'Z').toLocaleString()}</td>
+                      <td className="px-4 py-3 text-xs text-text2">{formatIsoDate(d.first_seen, 'datetime')}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -342,8 +342,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {flappingPorts.map((p, i) => (
-                    <tr key={i} className="hover:bg-accent/5 transition-colors">
+                  {flappingPorts.map((p) => (
+                    <tr key={p.port_id} className="hover:bg-accent/5 transition-colors">
                       <td className="px-4 py-3 text-xs">
                         <button
                           onClick={() => onJumpToFaceplate(p.device_id, p.port_index)}
@@ -357,7 +357,7 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                       <td className="px-4 py-3">
                         <span className="px-2 py-0.5 bg-yellow/20 text-yellow font-bold text-xs rounded">{p.flap_count}</span>
                       </td>
-                      <td className="px-4 py-3 text-xs text-text2">{p.last_flap_at ? new Date(p.last_flap_at + 'Z').toLocaleString() : '—'}</td>
+                      <td className="px-4 py-3 text-xs text-text2">{formatIsoDate(p.last_flap_at, 'datetime')}</td>
                       <td className="px-4 py-3">
                         <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${p.oper_status === 1 ? 'bg-green/20 text-green' : 'bg-red/20 text-red'}`}>
                           {p.oper_status === 1 ? 'UP' : 'DOWN'}
@@ -395,8 +395,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {errorPorts.map((p, i) => (
-                    <tr key={i} className="hover:bg-accent/5 transition-colors">
+                  {errorPorts.map((p) => (
+                    <tr key={p.port_id} className="hover:bg-accent/5 transition-colors">
                       <td className="px-4 py-3 text-xs">
                         <button onClick={() => onJumpToFaceplate(p.device_id, p.port_index)} className="text-left hover:underline group">
                           <span className="font-medium text-white group-hover:text-accent transition-colors">{p.device_hostname}</span>
@@ -443,8 +443,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {ipConflicts.map((c, i) => (
-                    <tr key={i} className="hover:bg-accent/5 transition-colors">
+                  {ipConflicts.map((c) => (
+                    <tr key={c.ip_address} className="hover:bg-accent/5 transition-colors">
                       <td className="px-4 py-3 font-mono text-xs text-white">
                         <span className="flex items-center">{c.ip_address}<NetworkBadge ip={c.ip_address} subnets={subnets} /></span>
                       </td>
@@ -453,11 +453,11 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-col gap-1">
-                          {c.entries.map((e, j) => (
-                            <div key={j} className="text-[11px]">
+                          {c.entries.map((e) => (
+                            <div key={e.mac_address} className="text-[11px]">
                               <span className="font-mono text-text2">{e.mac_address}</span>
                               {e.hostname && <span className="text-accent ml-2">{e.hostname}</span>}
-                              <span className="text-text2/50 ml-2">{new Date(e.last_seen + 'Z').toLocaleDateString()}</span>
+                              <span className="text-text2/50 ml-2">{formatIsoDate(e.last_seen, 'date')}</span>
                             </div>
                           ))}
                         </div>
@@ -492,8 +492,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {filteredUtils.map((u, i) => (
-                <tr key={i} className="hover:bg-accent/5 transition-colors text-[13px]">
+              {filteredUtils.map((u) => (
+                <tr key={u.port_id} className="hover:bg-accent/5 transition-colors text-[13px]">
                   <td className="px-4 py-3">
                     <button onClick={() => onJumpToFaceplate(u.device_id, u.port_index)} className="text-left hover:underline group">
                       <span className="font-medium text-white group-hover:text-accent transition-colors">{u.device_hostname}</span>
@@ -657,8 +657,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                   <span className="ml-2 text-[10px] text-text2">{site.gaps.length} gap{site.gaps.length !== 1 ? 's' : ''}</span>
                 </div>
                 <div className="divide-y divide-border">
-                  {site.gaps.map((gap, j) => (
-                    <div key={j} className="px-4 py-3 flex items-start gap-4">
+                  {site.gaps.map((gap) => (
+                    <div key={gap.vlan_id} className="px-4 py-3 flex items-start gap-4">
                       <div className="min-w-[80px]">
                         <span className="font-bold text-yellow text-sm">VLAN {gap.vlan_id}</span>
                         {gap.vlan_name && <div className="text-[10px] text-text2">{gap.vlan_name}</div>}
@@ -701,8 +701,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {departedDevices.map((d, i) => (
-                  <tr key={i} className="hover:bg-accent/5 transition-colors">
+                {departedDevices.map((d) => (
+                  <tr key={d.mac_address} className="hover:bg-accent/5 transition-colors">
                     <td className="px-4 py-3 font-mono text-xs">
                       <button onClick={() => onSearch(d.mac_address)} className="text-text hover:text-accent hover:underline transition-colors">{d.mac_address}</button>
                     </td>
@@ -713,7 +713,7 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                         : <span className="text-text2">—</span>}
                     </td>
                     <td className="px-4 py-3 text-xs text-white">{d.hostname || '—'}</td>
-                    <td className="px-4 py-3 text-xs text-text2">{new Date(d.last_seen + 'Z').toLocaleDateString()}</td>
+                    <td className="px-4 py-3 text-xs text-text2">{formatIsoDate(d.last_seen, 'date')}</td>
                     <td className="px-4 py-3">
                       <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${d.days_gone > 30 ? 'bg-red/20 text-red' : 'bg-yellow/20 text-yellow'}`}>{d.days_gone}d</span>
                     </td>
@@ -745,8 +745,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {darkPorts.map((p, i) => (
-                  <tr key={i} className="hover:bg-accent/5 transition-colors">
+                {darkPorts.map((p) => (
+                  <tr key={p.port_id} className="hover:bg-accent/5 transition-colors">
                     <td className="px-4 py-3 text-xs">
                       <button onClick={() => onJumpToFaceplate(p.device_id, p.port_index)} className="text-left hover:underline group">
                         <span className="font-medium text-white group-hover:text-accent transition-colors">{p.device_hostname}</span>

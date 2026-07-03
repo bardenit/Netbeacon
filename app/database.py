@@ -64,6 +64,8 @@ def _migrate():
         "ALTER TABLE ports ADD COLUMN poe_draw_mw INTEGER",
         "ALTER TABLE mac_entries ADD COLUMN first_seen DATETIME",
         "ALTER TABLE ports ADD COLUMN port_type VARCHAR",
+        "CREATE INDEX IF NOT EXISTS ix_neighbors_local_port_id ON neighbors (local_port_id)",
+        "CREATE INDEX IF NOT EXISTS ix_port_vlans_vlan_id ON port_vlans (vlan_id)",
     ]
     with engine.connect() as conn:
         for sql in migrations:

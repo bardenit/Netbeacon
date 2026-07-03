@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Bell, Clock, Info, AlertTriangle, CheckCircle2, Trash2, CheckCircle } from 'lucide-react';
+import { formatIsoDate } from '../utils';
 
 interface Event {
   id: number;
@@ -34,7 +35,7 @@ export default function EventsView({ apiFetch }: { apiFetch: (url: string, optio
 
   const markAllRead = async () => {
     try {
-      await apiFetch('/api/events/read-all', { method: 'POST' });
+      await apiFetch('/api/events/mark-read', { method: 'POST' });
       fetchEvents();
     } catch (e) {
       console.error("Failed to mark all read", e);
@@ -93,7 +94,7 @@ export default function EventsView({ apiFetch }: { apiFetch: (url: string, optio
                   </span>
                   <div className="flex items-center gap-1 text-[10px] text-text2 font-medium shrink-0">
                     <Clock className="w-3 h-3" />
-                    {new Date(event.created_at + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    {formatIsoDate(event.created_at, 'time')}
                   </div>
                 </div>
                 <p className="text-xs text-text2 leading-relaxed">

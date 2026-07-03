@@ -198,18 +198,15 @@ def search(
     mac_normalized = q.replace(":", "").replace("-", "").replace(".", "")
 
     results: list[MacSearchResult] = []
+    ctx = _SearchContext(db)
 
     # ── Search by MAC ──────────────────────────────────────────────────────
     if len(mac_normalized) >= 4 and all(c in "0123456789abcdef" for c in mac_normalized):
-        from collections import defaultdict
-        matched: dict[str, list] = defaultdict(list)
-        for entry in db.query(MacEntry).all():
-            if mac_normalized in entry.mac_address.replace(":", ""):
-                matched[entry.mac_address].append(entry)
-        for entries in matched.values():
-            best = _pick_access_entry(entries, db)
-            if best:
-                _append_mac_result(results, best, db)
+        for mac, entries in ctx.entries_by_mac.items():
+            if mac_normalized in mac.replace(":", ""):
+                best = _pick_access_entry(entries, ctx)
+                if best:
+                    _append_mac_result(results, best, ctx)
 
     # ── Search by IP ───────────────────────────────────────────────────────
     if not results:
@@ -217,12 +214,9 @@ def search(
             ArpEntry.ip_address.like(f"%{q}%")
         ).all()
         for arp in arp_entries:
-            entries = db.query(MacEntry).filter(
-                MacEntry.mac_address == arp.mac_address
-            ).all()
-            best = _pick_access_entry(entries, db)
+            best = _pick_access_entry(ctx.entries_by_mac.get(arp.mac_address, []), ctx)
             if best:
-                _append_mac_result(results, best, db, ip_override=arp.ip_address)
+                _append_mac_result(results, best, ctx, ip_override=arp.ip_address)
 
     # ── Search by hostname fragment ────────────────────────────────────────
     if not results:
@@ -244,12 +238,9 @@ def search(
         for arp in arp_entries:
             if arp.mac_address in seen_macs:
                 continue
-            entries = db.query(MacEntry).filter(
-                MacEntry.mac_address == arp.mac_address
-            ).all()
-            best = _pick_access_entry(entries, db)
+            best = _pick_access_entry(ctx.entries_by_mac.get(arp.mac_address, []), ctx)
             if best:
-                _append_mac_result(results, best, db,
+                _append_mac_result(results, best, ctx,
                                    ip_override=arp.ip_address,
                                    hostname_override=arp.hostname)
                 seen_macs.add(arp.mac_address)
@@ -263,18 +254,48 @@ def search(
     for lbl in labels:
         if lbl.mac_address in seen_macs:
             continue
-        entries = db.query(MacEntry).filter(
-            MacEntry.mac_address == lbl.mac_address
-        ).all()
-        best = _pick_access_entry(entries, db)
+        best = _pick_access_entry(ctx.entries_by_mac.get(lbl.mac_address, []), ctx)
         if best:
-            _append_mac_result(results, best, db)
+            _append_mac_result(results, best, ctx)
             seen_macs.add(lbl.mac_address)
 
     return results[:200]
 
 
-def _pick_access_entry(entries: list, db: Session):
+class _SearchContext:
+    """Per-request lookup tables so search scoring never queries inside a loop."""
+
+    def __init__(self, db: Session):
+        devices = db.query(Device).all()
+        self.device_map: dict[int, Device] = {d.id: d for d in devices}
+        self.known_names: set[str] = set()
+        for d in devices:
+            if d.hostname:
+                self.known_names.add(d.hostname.lower())
+            if d.snmp_name:
+                self.known_names.add(d.snmp_name.lower())
+
+        # LLDP neighbor per (device_id, port_id)
+        self.neighbor_by_port: dict[tuple[int, int], Neighbor] = {}
+        for n in db.query(Neighbor).all():
+            if n.local_port_id is not None:
+                self.neighbor_by_port[(n.local_device_id, n.local_port_id)] = n
+
+        # All FDB entries grouped by MAC + per-port MAC counts (trunk detection)
+        self.entries_by_mac: dict[str, list[MacEntry]] = {}
+        self.mac_count_by_port: dict[int, int] = {}
+        for e in db.query(MacEntry).all():
+            self.entries_by_mac.setdefault(e.mac_address, []).append(e)
+            if e.port_id is not None:
+                self.mac_count_by_port[e.port_id] = self.mac_count_by_port.get(e.port_id, 0) + 1
+
+        # Newest ARP entry per MAC
+        self.arp_by_mac: dict[str, ArpEntry] = {}
+        for a in db.query(ArpEntry).order_by(ArpEntry.last_seen.asc()).all():
+            self.arp_by_mac[a.mac_address] = a
+
+
+def _pick_access_entry(entries: list, ctx: _SearchContext):
     """Given multiple MacEntry records for the same MAC, return the access-port one.
 
     Trunk ports (LLDP neighbor is a known managed switch) are deprioritized.
@@ -286,62 +307,45 @@ def _pick_access_entry(entries: list, db: Session):
     if len(entries) == 1:
         return entries[0]
 
-    # Build a set of known device names once for the comparison
-    known_names: set[str] = set()
-    for d in db.query(Device).all():
-        if d.hostname:
-            known_names.add(d.hostname.lower())
-        if d.snmp_name:
-            known_names.add(d.snmp_name.lower())
-
     def score(entry):
         port = entry.port
         if not port:
             return (1, 999999)
-        mac_count = db.query(MacEntry).filter(MacEntry.port_id == port.id).count()
-        neighbor = db.query(Neighbor).filter(
-            Neighbor.local_device_id == entry.device_id,
-            Neighbor.local_port_id == port.id,
-        ).first()
+        mac_count = ctx.mac_count_by_port.get(port.id, 0)
+        neighbor = ctx.neighbor_by_port.get((entry.device_id, port.id))
         # Only penalise if the LLDP peer is a switch we manage — not an AP
         is_switch_trunk = (
             neighbor is not None and
-            (neighbor.remote_system_name or '').lower() in known_names
+            (neighbor.remote_system_name or '').lower() in ctx.known_names
         )
         return (int(is_switch_trunk), mac_count)
 
     return min(entries, key=score)
 
 
-def _append_mac_result(results: list, entry: MacEntry, db: Session,
+def _append_mac_result(results: list, entry: MacEntry, ctx: _SearchContext,
                        ip_override: str | None = None,
                        hostname_override: str | None = None):
-    device = db.get(Device, entry.device_id)
+    device = ctx.device_map.get(entry.device_id)
     if not device:
         return
 
     port = entry.port
     arp = None
     if not ip_override:
-        arp = db.query(ArpEntry).filter(
-            ArpEntry.mac_address == entry.mac_address
-        ).first()
+        arp = ctx.arp_by_mac.get(entry.mac_address)
 
     end_host_hostname = hostname_override or (arp.hostname if arp else None)
 
     # Count total MACs on this port (for trunk detection)
     port_mac_count = None
     if port:
-        port_mac_count = db.query(MacEntry).filter(MacEntry.port_id == port.id).count()
+        port_mac_count = ctx.mac_count_by_port.get(port.id, 0)
 
     # Check for LLDP neighbor on this port
     lldp_name = None
     if port:
-        from app.models import Neighbor
-        neighbor = db.query(Neighbor).filter(
-            Neighbor.local_device_id == device.id,
-            Neighbor.local_port_id == port.id,
-        ).first()
+        neighbor = ctx.neighbor_by_port.get((device.id, port.id))
         if neighbor:
             lldp_name = neighbor.remote_system_name
 

@@ -329,8 +329,8 @@ export default function SettingsView({ apiFetch }: { apiFetch: (url: string, opt
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {scanResults.map((found, i) => (
-                <div key={i} className="bg-surface border border-border rounded-xl p-4 flex items-center justify-between">
+              {scanResults.map((found) => (
+                <div key={found.ip_address} className="bg-surface border border-border rounded-xl p-4 flex items-center justify-between">
                   <div className="flex-1 min-w-0 pr-4">
                     <div className="font-bold text-white text-xs">{found.sys_name || found.ip_address}</div>
                     <div className="text-[10px] text-text2 font-mono mt-0.5">{found.ip_address}</div>

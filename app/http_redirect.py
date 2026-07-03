@@ -1,6 +1,11 @@
 """Tiny HTTP server that redirects all requests to HTTPS (hardcoded target host)."""
 import http.server
 import os
+import re
+
+# Hostnames/IPs only: letters, digits, dots, hyphens. Rejects anything that could
+# smuggle a scheme, userinfo, port, or path into the Location header.
+_HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")
 
 # Use SERVER_HOST env var if set, otherwise redirect to the same hostname the
 # client used — but validated to prevent open-redirect via Host header injection.
@@ -24,14 +29,15 @@ class RedirectHandler(http.server.BaseHTTPRequestHandler):
         host = raw_host.split(":")[0].strip()
 
         # Validate: if ALLOWED_HOSTS is configured, only redirect to known hosts.
-        # If not configured, accept any non-empty host (internal tool — trusted LAN).
+        # Otherwise (internal tool — trusted LAN) accept any syntactically valid
+        # hostname/IP; malformed Host headers fall back to localhost.
         if _ALLOWED_HOSTS and host not in _ALLOWED_HOSTS:
             self.send_response(400)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
 
-        if not host:
+        if not host or not _HOST_RE.match(host):
             host = "localhost"
 
         port_suffix = f":{_HTTPS_PORT}" if _HTTPS_PORT != 443 else ""

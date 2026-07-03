@@ -52,12 +52,6 @@ def list_events(limit: int = Query(default=100, le=1000), unread_only: bool = Fa
     return result
 
 
-@router.get("/unread-count")
-def unread_count(db: Session = Depends(get_db)):
-    count = db.query(Event).filter(Event.read == False).count()  # noqa: E712
-    return {"count": count}
-
-
 @router.post("/mark-read", status_code=204)
 def mark_all_read(db: Session = Depends(get_db)):
     db.query(Event).filter(Event.read == False).update({"read": True})  # noqa: E712
