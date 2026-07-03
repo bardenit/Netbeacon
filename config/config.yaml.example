@@ -1,6 +1,11 @@
 snmp_default_community: public
 snmp_version: 2c
-poll_interval_minutes: 15
+poll_interval_minutes: 15        # full poll (FDB/ARP/VLAN/LLDP) while UI is open
+
+# Adaptive polling — cadence relaxes automatically when no browser is watching.
+# fast_poll_seconds: 60          # interface-status poll while UI is open (0 = disable adaptive mode)
+# idle_poll_interval_minutes: 60 # full poll when nobody is watching
+# idle_status_poll_minutes: 5    # status poll when nobody is watching (keeps down-alerts timely)
 
 # Alert notifications (optional)
 # alerts:

@@ -16,6 +16,11 @@ def load_config() -> dict:
         "snmp_default_community": "public",
         "snmp_version": "2c",
         "poll_interval_minutes": int(os.environ.get("POLL_INTERVAL_MINUTES", 15)),
+        # Fast interface-status poll while someone is watching the UI (0 disables)
+        "fast_poll_seconds": int(os.environ.get("FAST_POLL_SECONDS", 60)),
+        # Relaxed cadence when no browser is connected
+        "idle_poll_interval_minutes": int(os.environ.get("IDLE_POLL_INTERVAL_MINUTES", 60)),
+        "idle_status_poll_minutes": int(os.environ.get("IDLE_STATUS_POLL_MINUTES", 5)),
         "log_level": os.environ.get("LOG_LEVEL", "INFO"),
         "devices": [],
     }

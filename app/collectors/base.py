@@ -420,6 +420,21 @@ class BaseCollector:
         )
         return result
 
+    async def collect_status(self) -> CollectorResult:
+        """Light poll: interface status/speed/counters only.
+
+        Skips the expensive walks (FDB, ARP, VLANs, LLDP, bridge map) so it can
+        run frequently without loading switch management CPUs or the network.
+        """
+        result = CollectorResult()
+        try:
+            await self._collect_interfaces(result)
+        except Exception as e:
+            logger.getChild(self.host).error("Status poll failed: %s", e)
+            result.errors.append(f"interfaces: {e}")
+            result.partial = True
+        return result
+
     # ── Convenience wrappers that auto-inject host/community/version/v3_params ──
 
     async def _get(self, oids: list[str], timeout: int | None = None) -> dict:

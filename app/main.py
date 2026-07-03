@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import dashboard, devices, events, labels, security, status, subnets, topology, auth
+from app.api import dashboard, devices, events, labels, live, security, status, subnets, topology, auth
 from app.api.auth import get_current_user
 from app.config import get_config
 from app.database import init_db
@@ -70,6 +70,8 @@ def health():
 # Public
 app.include_router(auth.router)
 app.include_router(status.router)
+# Stream: GET guarded by one-time ticket, POST /ticket guarded by JWT internally
+app.include_router(live.router)
 
 # Protected
 app.include_router(devices.router,   dependencies=[Depends(get_current_user)])

@@ -20,6 +20,7 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.orm import Session
 
+from app import stream
 from app.config import get_config
 from app.database import SessionLocal
 from app.alerts import send_alert
@@ -40,31 +41,103 @@ def _classify_poll_error(exc: Exception) -> str:
 
 _scheduler: AsyncIOScheduler | None = None
 _executor = ThreadPoolExecutor(max_workers=10)
-_last_poll_time: datetime | None = None
-_next_poll_time: datetime | None = None
+_last_poll_time: datetime | None = None       # last FULL poll cycle
+_last_status_poll_time: datetime | None = None
+_poll_lock = asyncio.Lock()
 
 
-def get_scheduler_state() -> dict[str, Any]:
+def _intervals() -> dict[str, int]:
+    cfg = get_config()
     return {
-        "last_poll_time": _last_poll_time,
-        "next_poll_time": _next_poll_time,
-        "poll_interval_minutes": get_config().get("poll_interval_minutes", 15),
+        "full_active_s": int(cfg.get("poll_interval_minutes", 15)) * 60,
+        "full_idle_s": int(cfg.get("idle_poll_interval_minutes", 60)) * 60,
+        "status_active_s": int(cfg.get("fast_poll_seconds", 60)),
+        "status_idle_s": int(cfg.get("idle_status_poll_minutes", 5)) * 60,
     }
 
 
+def get_scheduler_state() -> dict[str, Any]:
+    iv = _intervals()
+    watched = stream.is_watched()
+    full_interval_s = iv["full_active_s"] if watched else iv["full_idle_s"]
+    next_poll = (_last_poll_time + timedelta(seconds=full_interval_s)) if _last_poll_time else None
+    return {
+        "last_poll_time": _last_poll_time,
+        "next_poll_time": next_poll,
+        "poll_interval_minutes": get_config().get("poll_interval_minutes", 15),
+        "watched": watched,
+        "watchers": stream.watcher_count(),
+        "last_status_poll_time": _last_status_poll_time,
+    }
+
+
+async def _tick():
+    """Master cadence decision, runs every fast_poll_seconds.
+
+    Watched (a browser holds the SSE stream, or within grace period):
+      full poll every poll_interval_minutes, light status poll every tick.
+    Idle: full poll every idle_poll_interval_minutes, status poll every
+      idle_status_poll_minutes (keeps device/port-down events and alerts timely).
+    """
+    if _poll_lock.locked():
+        return  # previous cycle still running — never stack polls
+    iv = _intervals()
+    watched = stream.is_watched()
+    now = datetime.utcnow()
+    # Small tolerance so a tick that fires marginally early still counts as due
+    tol = timedelta(seconds=max(iv["status_active_s"] // 4, 5))
+
+    full_every = iv["full_active_s"] if watched else iv["full_idle_s"]
+    if _last_poll_time is None or now - _last_poll_time >= timedelta(seconds=full_every) - tol:
+        await poll_all_devices()
+        return
+
+    status_every = iv["status_active_s"] if watched else iv["status_idle_s"]
+    last_any = max(t for t in (_last_status_poll_time, _last_poll_time) if t is not None)
+    if now - last_any >= timedelta(seconds=status_every) - tol:
+        await poll_all_status()
+
+
+def kick_status_poll():
+    """Called when the first SSE client connects: refresh promptly if data is stale."""
+    iv = _intervals()
+    now = datetime.utcnow()
+    candidates = [t for t in (_last_status_poll_time, _last_poll_time) if t is not None]
+    last_any = max(candidates) if candidates else None
+    if last_any is None or now - last_any >= timedelta(seconds=iv["status_active_s"]):
+        asyncio.create_task(poll_all_status())
+
+
 def start_scheduler():
-    global _scheduler, _next_poll_time
+    global _scheduler
     config = get_config()
     interval = config.get("poll_interval_minutes", 15)
+    fast_s = max(int(config.get("fast_poll_seconds", 60)), 15) if config.get("fast_poll_seconds", 60) else 0
 
     _scheduler = AsyncIOScheduler()
-    _scheduler.add_job(
-        poll_all_devices,
-        trigger="interval",
-        minutes=interval,
-        id="poll_all",
-        next_run_time=datetime.now(),  # run immediately on startup
-    )
+    if fast_s:
+        _scheduler.add_job(
+            _tick,
+            trigger="interval",
+            seconds=fast_s,
+            id="poll_tick",
+            next_run_time=datetime.now(),  # immediate full poll on startup
+        )
+        logger.info(
+            "Adaptive polling: full every %dm (idle %dm), status every %ds (idle %dm)",
+            interval, config.get("idle_poll_interval_minutes", 60),
+            fast_s, config.get("idle_status_poll_minutes", 5),
+        )
+    else:
+        # fast_poll_seconds=0 disables the adaptive tier — classic fixed-interval mode
+        _scheduler.add_job(
+            poll_all_devices,
+            trigger="interval",
+            minutes=interval,
+            id="poll_all",
+            next_run_time=datetime.now(),
+        )
+        logger.info("Fixed polling every %d minutes (fast poll disabled)", interval)
 
     # Daily digest email — 7am UTC
     from app.alerts import send_digest
@@ -78,12 +151,6 @@ def start_scheduler():
     logger.info("Daily digest email scheduled at 07:00 UTC")
 
     _scheduler.start()
-    logger.info("Scheduler started — polling every %d minutes", interval)
-
-    # Track next run time
-    job = _scheduler.get_job("poll_all")
-    if job:
-        _next_poll_time = job.next_run_time
 
 
 def stop_scheduler():
@@ -96,32 +163,146 @@ def stop_scheduler():
 # ── Poll functions ────────────────────────────────────────────────────────────
 
 async def poll_all_devices():
-    """Poll every device in the database concurrently."""
-    global _last_poll_time, _next_poll_time
+    """Poll every device in the database concurrently (full walk)."""
+    global _last_poll_time, _last_status_poll_time
 
-    _last_poll_time = datetime.utcnow()
-    logger.info("=== Poll cycle started at %s ===", _last_poll_time.isoformat())
+    async with _poll_lock:
+        _last_poll_time = datetime.utcnow()
+        _last_status_poll_time = _last_poll_time  # a full poll includes status data
+        logger.info("=== Poll cycle started at %s ===", _last_poll_time.isoformat())
+
+        with SessionLocal() as db:
+            devices = db.query(Device).all()
+
+        if not devices:
+            logger.info("No devices configured — nothing to poll")
+            return
+
+        tasks = [poll_device(device.id) for device in devices]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Global prune once per poll cycle to keep DB lean
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_executor, _prune_stale_data)
+
+        logger.info("=== Poll cycle complete ===")
+    stream.publish({"type": "cycle_complete", "scope": "full"})
+
+
+async def poll_all_status():
+    """Light status poll of every device (interface status/counters only)."""
+    global _last_status_poll_time
+
+    async with _poll_lock:
+        _last_status_poll_time = datetime.utcnow()
+        logger.info("--- Status poll started ---")
+
+        with SessionLocal() as db:
+            devices = db.query(Device).all()
+        if not devices:
+            return
+
+        tasks = [poll_device_status(device.id) for device in devices]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("--- Status poll complete ---")
+    stream.publish({"type": "cycle_complete", "scope": "status"})
+
+
+async def poll_device_status(device_id: int) -> bool:
+    """Light poll of one device: interface table only. Returns True on success."""
+    with SessionLocal() as db:
+        device = db.get(Device, device_id)
+        if not device:
+            return False
+        is_first_poll = device.last_polled is None
+        prev_poll_status = device.poll_status
+        prev_port_oper = {p.port_index: p.oper_status for p in device.ports}
+        host = device.ip_address
+        community = device.snmp_community
+        version = device.snmp_version or "2c"
+        vendor = device.vendor
+        v3_params = None
+        if version == "3" and device.snmp_v3_username:
+            v3_params = {
+                "username":      device.snmp_v3_username,
+                "auth_protocol": device.snmp_v3_auth_protocol or "SHA",
+                "auth_password": device.snmp_v3_auth_password or "",
+                "priv_protocol": device.snmp_v3_priv_protocol or "AES",
+                "priv_password": device.snmp_v3_priv_password or "",
+            }
+
+    try:
+        collector_class = get_collector(vendor)
+        collector = collector_class(host=host, community=community, version=version,
+                                    v3_params=v3_params)
+        result: CollectorResult = await collector.collect_status()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_executor, _persist_status_result, device_id, result)
+
+        if result.partial and not result.ports:
+            status = "error"
+            error_msg = ("; ".join(result.errors))[:300] if result.errors else None
+        else:
+            # A status poll can't observe the walks that caused "degraded" —
+            # keep that state until the next full poll clears it.
+            status = "degraded" if prev_poll_status == "degraded" else "ok"
+            error_msg = None
+
+    except Exception as e:
+        logger.error("Status poll failed for device %d (%s): %s", device_id, host, e)
+        status = "error"
+        error_msg = _classify_poll_error(e)
+        result = None
 
     with SessionLocal() as db:
-        devices = db.query(Device).all()
+        device = db.get(Device, device_id)
+        if device:
+            device.last_polled = datetime.utcnow()
+            device.poll_status = status
+            device.poll_error = error_msg
+            db.commit()
 
-    if not devices:
-        logger.info("No devices configured — nothing to poll")
-        return
+    # Device up/down and port up/down events only (empty MAC/neighbor baselines
+    # make the MAC-churn and topology diffs no-ops)
+    if not is_first_poll:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            _executor, _generate_events,
+            device_id, prev_poll_status, status, prev_port_oper, set(), set(), result
+        )
 
-    tasks = [poll_device(device.id) for device in devices]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    stream.publish({"type": "device_polled", "scope": "status",
+                    "device_id": device_id, "status": status})
+    return status != "error"
 
-    # Global prune once per poll cycle to keep DB lean
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(_executor, _prune_stale_data)
 
-    if _scheduler:
-        job = _scheduler.get_job("poll_all")
-        if job:
-            _next_poll_time = job.next_run_time
+def _persist_status_result(device_id: int, result: CollectorResult):
+    """Update port status/speed/counters from a light poll. Runs in thread pool.
 
-    logger.info("=== Poll cycle complete ===")
+    Only touches existing Port rows — new ports (and everything else: VLANs,
+    FDB, ARP, LLDP) are handled by the full poll.
+    """
+    now = datetime.utcnow()
+    with SessionLocal() as db:
+        device = db.get(Device, device_id)
+        if not device:
+            return
+        existing_ports = {p.port_index: p for p in device.ports}
+        for pd in result.ports:
+            port = existing_ports.get(pd.port_index)
+            if not port:
+                continue
+            prev_oper = port.oper_status
+            if prev_oper is not None and pd.oper_status is not None and prev_oper != pd.oper_status:
+                port.flap_count = (port.flap_count or 0) + 1
+                port.last_flap_at = now
+            port.oper_status = pd.oper_status
+            port.admin_status = pd.admin_status
+            port.speed = pd.speed
+            port.rx_bytes = pd.rx_bytes
+            port.tx_bytes = pd.tx_bytes
+            port.last_seen = now
+        db.commit()
 
 
 async def poll_device(device_id: int) -> bool:
@@ -195,6 +376,8 @@ async def poll_device(device_id: int) -> bool:
         )
 
     logger.info("Device %d poll_status=%s", device_id, status)
+    stream.publish({"type": "device_polled", "scope": "full",
+                    "device_id": device_id, "status": status})
     return status != "error"
 
 

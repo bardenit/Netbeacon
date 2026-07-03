@@ -107,6 +107,60 @@ export default function App() {
     return () => clearInterval(interval);
   }, [token]);
 
+  // Live updates: hold an SSE stream open while the tab is visible.
+  // The server only runs fast polls while at least one stream is connected,
+  // so closing on hidden tabs directly reduces SNMP traffic.
+  useEffect(() => {
+    if (!token) return;
+    let es: EventSource | null = null;
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    let closed = false;
+
+    const refresh = () => {
+      setRefreshKey(k => k + 1);
+      fetchStatus();
+      fetchTopology();
+    };
+
+    const openStream = async () => {
+      if (es || closed || document.hidden) return;
+      try {
+        // Tickets are single-use and short-lived — fetch a fresh one per connect
+        const res = await apiFetch('/api/stream/ticket', { method: 'POST' });
+        if (!res.ok) return;
+        const { ticket } = await res.json();
+        if (closed || document.hidden) return;
+        es = new EventSource(`/api/stream?ticket=${encodeURIComponent(ticket)}`);
+        es.onmessage = (e) => {
+          let ev: any = null;
+          try { ev = JSON.parse(e.data); } catch { return; }
+          if (debounce) clearTimeout(debounce);
+          if (ev.type === 'cycle_complete') {
+            refresh();
+          } else {
+            debounce = setTimeout(refresh, 2000);
+          }
+        };
+        es.onerror = () => {
+          // Built-in reconnect would replay the consumed ticket — reconnect manually
+          es?.close(); es = null;
+          if (!closed && !document.hidden) setTimeout(openStream, 5000);
+        };
+      } catch {}
+    };
+    const closeStream = () => { es?.close(); es = null; };
+    const onVisibility = () => { document.hidden ? closeStream() : openStream(); };
+
+    openStream();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      closed = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      closeStream();
+      if (debounce) clearTimeout(debounce);
+    };
+  }, [token, apiFetch]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleLabelMac = (mac: string) => {
     setLabelPrefill(mac);
     setActiveTab('macnames');
