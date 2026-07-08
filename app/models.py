@@ -60,6 +60,20 @@ class Device(Base):
     mac_entries = relationship("MacEntry", back_populates="device", cascade="all, delete-orphan")
 
 
+def is_fortigate(device: "Device") -> bool:
+    """FortiGate interface counters report errant values — their ports are
+    excluded from port-health diagnostics and error events.
+
+    The FortiGates are the gateway devices, so is_gateway is the primary
+    signal; the name/API-key checks cover FortiGates not marked as gateway."""
+    if device.is_gateway or device.fortigate_api_key:
+        return True
+    for s in (device.vendor, device.hostname, device.snmp_name, device.sys_description):
+        if s and ("forti" in s.lower() or s.lower().startswith("fgt")):
+            return True
+    return False
+
+
 class Port(Base):
     __tablename__ = "ports"
 

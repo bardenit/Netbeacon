@@ -515,6 +515,8 @@ class BaseCollector:
         if "netgear" in desc_lower or "smart managed" in desc_lower or \
                 re.match(r'^(GS|FS|M4|XS|MS|JGS|GSM|FSM|GSS|SFP)\d', desc):
             return "netgear", None, None
+        if "forti" in desc_lower or re.match(r'^FGT', desc):
+            return "fortigate", None, None
         return None, None, None
 
     async def _collect_interfaces(self, result: CollectorResult):

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query
 logger = logging.getLogger(__name__)
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import ArpEntry, Device, MacEntry, Neighbor, Port, PortStat, Subnet, Vlan
+from app.models import ArpEntry, Device, MacEntry, Neighbor, Port, PortStat, Subnet, Vlan, is_fortigate
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -52,14 +52,19 @@ def get_summary(db: Session = Depends(get_db)):
     yesterday = datetime.utcnow() - timedelta(hours=24)
     new_devices = db.query(MacEntry).filter(MacEntry.first_seen >= yesterday).count()
 
-    # Windowed health counts (24h) — lifetime flap_count is deliberately not used
+    # Windowed health counts (24h) — lifetime flap_count is deliberately not used.
+    # FortiGate (gateway) ports report errant counters and are excluded.
     from sqlalchemy import and_, or_
+    fg_ids = _fortigate_ids(db)
     flapping = db.query(Port).filter(Port.last_flap_at >= yesterday).count()
-    unhealthy = db.query(Port).filter(or_(
-        Port.last_error_at >= yesterday,
-        and_(Port.oper_status == 1, Port.duplex == 2),
-        and_(Port.oper_status == 1, Port.max_speed_seen > Port.speed),
-    )).count()
+    unhealthy = db.query(Port).filter(
+        Port.device_id.notin_(fg_ids),
+        or_(
+            Port.last_error_at >= yesterday,
+            and_(Port.oper_status == 1, Port.duplex == 2),
+            and_(Port.oper_status == 1, Port.max_speed_seen > Port.speed),
+        ),
+    ).count()
 
     return {
         "unhealthy_ports": unhealthy,
@@ -240,6 +245,10 @@ def new_devices(hours: int = Query(default=24, ge=1, le=8760), db: Session = Dep
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "info": 3}
 
 
+def _fortigate_ids(db: Session) -> set[int]:
+    return {d.id for d in db.query(Device).all() if is_fortigate(d)}
+
+
 def _stat_windows(db: Session, port_ids: list[int], cutoff: datetime) -> dict[int, dict]:
     """Per-port 24h counter deltas (last sample minus first sample, clamped ≥0)."""
     windows: dict[int, dict] = {}
@@ -295,6 +304,7 @@ def port_health(db: Session = Depends(get_db)):
         ))
         .all()
     )
+    rows = [(p, d) for p, d in rows if not is_fortigate(d)]
 
     windows = _stat_windows(db, [p.id for p, _ in rows], day_ago)
 

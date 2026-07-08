@@ -252,7 +252,7 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
   }), [vitals]);
 
   const vitalsWarnCount = useMemo(() => vitals.filter(v =>
-    (v.cpu_util ?? 0) >= 90 || (v.mem_used_pct ?? 0) >= 90 || (v.temperature ?? 0) >= 60 ||
+    (v.cpu_util ?? 0) >= 90 || (v.mem_used_pct ?? 0) >= 90 || (v.temperature ?? 0) >= 95 ||
     v.fans_ok === false || v.psu_ok === false
   ).length, [vitals]);
 
@@ -482,7 +482,7 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                         </span>
                       </td>
                       <td className="px-4 py-3 text-xs">
-                        <span className={`font-bold ${v.temperature == null ? 'text-text2' : v.temperature >= 60 ? 'text-red' : 'text-text2'}`}>
+                        <span className={`font-bold ${v.temperature == null ? 'text-text2' : v.temperature >= 95 ? 'text-red' : 'text-text2'}`}>
                           {v.temperature != null ? `${v.temperature}°C` : '—'}
                         </span>
                       </td>

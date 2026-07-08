@@ -24,7 +24,7 @@ from app import stream
 from app.config import get_config
 from app.database import SessionLocal
 from app.alerts import send_alert
-from app.models import ArpEntry, Device, Event, MacEntry, Neighbor, Port, PortMacHistory, PortStat, PortVlan, Vlan
+from app.models import ArpEntry, Device, Event, MacEntry, Neighbor, Port, PortMacHistory, PortStat, PortVlan, Vlan, is_fortigate
 from app.collectors import get_collector
 from app.collectors.base import CollectorResult, bitmap_to_port_set
 
@@ -281,6 +281,7 @@ async def poll_device_status(device_id: int) -> bool:
 def _snapshot_health(device) -> dict:
     """Pre-poll snapshot of counters/vitals used for delta-based event generation."""
     return {
+        "is_fortigate": is_fortigate(device),
         "port_err": {
             p.port_index: (p.rx_errors or 0) + (p.tx_errors or 0)
             for p in device.ports
@@ -825,8 +826,10 @@ def _generate_events(
                 ))
 
         # ── Port health: error bursts ──────────────────────────────────────
+        # FortiGates report errant port error counters — no error events for them
         PORT_ERROR_EVENT_THRESHOLD = 10
-        prev_err = (prev_health or {}).get("port_err", {})
+        prev_err = {} if (prev_health or {}).get("is_fortigate") \
+            else (prev_health or {}).get("port_err", {})
         for pd in result.ports:
             prev_total = prev_err.get(pd.port_index)
             if prev_total is None or (pd.rx_errors is None and pd.tx_errors is None):
