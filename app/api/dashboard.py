@@ -561,17 +561,24 @@ def departed_devices(
 
 @router.get("/error-ports")
 def error_ports(db: Session = Depends(get_db)):
-    """Ports with non-zero error counters, sorted by total errors descending."""
+    """Ports with recent error activity, sorted by total errors descending.
+
+    Requires last_error_at within 7 days — lifetime counters alone (nonzero
+    since switch boot) are noise. FortiGate (gateway) ports are excluded;
+    their counters report errant values."""
+    week_ago = datetime.utcnow() - timedelta(days=7)
     rows = (
         db.query(Port, Device)
         .join(Device, Port.device_id == Device.id)
         .filter(
-            (Port.rx_errors > 0) | (Port.tx_errors > 0)
+            (Port.rx_errors > 0) | (Port.tx_errors > 0),
+            Port.last_error_at >= week_ago,
         )
         .order_by((Port.rx_errors + Port.tx_errors).desc())
         .limit(100)
         .all()
     )
+    rows = [(p, d) for p, d in rows if not is_fortigate(d)]
     result = []
     for port, device in rows:
         rx_err = port.rx_errors or 0
