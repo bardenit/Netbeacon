@@ -217,6 +217,7 @@ async def poll_device_status(device_id: int) -> bool:
         is_first_poll = device.last_polled is None
         prev_poll_status = device.poll_status
         prev_port_oper = {p.port_index: p.oper_status for p in device.ports}
+        prev_health = _snapshot_health(device)
         host = device.ip_address
         community = device.snmp_community
         version = device.snmp_version or "2c"
@@ -268,12 +269,91 @@ async def poll_device_status(device_id: int) -> bool:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             _executor, _generate_events,
-            device_id, prev_poll_status, status, prev_port_oper, set(), set(), result
+            device_id, prev_poll_status, status, prev_port_oper, set(), set(), result,
+            prev_health,
         )
 
     stream.publish({"type": "device_polled", "scope": "status",
                     "device_id": device_id, "status": status})
     return status != "error"
+
+
+def _snapshot_health(device) -> dict:
+    """Pre-poll snapshot of counters/vitals used for delta-based event generation."""
+    return {
+        "port_err": {
+            p.port_index: (p.rx_errors or 0) + (p.tx_errors or 0)
+            for p in device.ports
+            if p.rx_errors is not None or p.tx_errors is not None
+        },
+        "poe_mw": {p.port_index: p.poe_draw_mw for p in device.ports},
+        "sys_uptime": device.sys_uptime,
+        "fans_ok": device.fans_ok,
+        "psu_ok": device.psu_ok,
+        "cpu_util": device.cpu_util,
+        "stp_top_changes": device.stp_top_changes,
+    }
+
+
+def _counter_delta(prev_a, prev_b, new_a, new_b) -> int | None:
+    """Positive delta of a paired counter, or None if unknown/reset (wrap guard)."""
+    if (new_a is None and new_b is None) or (prev_a is None and prev_b is None):
+        return None
+    d = ((new_a or 0) + (new_b or 0)) - ((prev_a or 0) + (prev_b or 0))
+    return d if d > 0 else None
+
+
+def _apply_port_health(port: Port, pd, now: datetime, rebooted: bool):
+    """Flap detection, error/discard activity stamps, and max-speed tracking.
+
+    Shared by the full and light persist paths. Must run BEFORE the new
+    counter values are copied onto the Port row (deltas need the old values).
+    """
+    prev_oper = port.oper_status
+    if prev_oper is not None and pd.oper_status is not None and prev_oper != pd.oper_status:
+        port.flap_count = (port.flap_count or 0) + 1
+        port.last_flap_at = now
+    elif (not rebooted and pd.if_last_change is not None and port.if_last_change is not None
+          and pd.if_last_change > port.if_last_change):
+        # Link bounced between polls: oper status looks unchanged but the
+        # interface's last-change timestamp moved forward.
+        port.flap_count = (port.flap_count or 0) + 1
+        port.last_flap_at = now
+
+    if _counter_delta(port.rx_errors, port.tx_errors, pd.rx_errors, pd.tx_errors):
+        port.last_error_at = now
+    if _counter_delta(port.rx_discards, port.tx_discards, pd.rx_discards, pd.tx_discards):
+        port.last_discard_at = now
+
+    if pd.oper_status == 1 and pd.speed and pd.speed > (port.max_speed_seen or 0):
+        port.max_speed_seen = pd.speed
+
+    # Copy health fields (only when the walk returned data — None means the
+    # walk failed and we keep the previous baseline)
+    for attr in ("rx_errors", "tx_errors", "rx_discards", "tx_discards",
+                 "duplex", "if_last_change", "stp_state"):
+        val = getattr(pd, attr)
+        if val is not None:
+            setattr(port, attr, val)
+
+
+def _apply_device_vitals(device: Device, result: CollectorResult, now: datetime) -> bool:
+    """Copy vitals onto the Device row. Returns True if the device rebooted
+    since the previous poll (sysUpTime went backwards)."""
+    rebooted = (result.sys_uptime is not None and device.sys_uptime is not None
+                and result.sys_uptime < device.sys_uptime)
+    if result.sys_uptime is not None:
+        device.sys_uptime = result.sys_uptime
+    updated = False
+    for attr in ("cpu_util", "mem_used_pct", "temperature", "fans_ok", "psu_ok",
+                 "poe_budget_w", "poe_used_w", "stp_top_changes"):
+        val = getattr(result, attr)
+        if val is not None:
+            setattr(device, attr, val)
+            updated = True
+    if updated:
+        device.vitals_updated_at = now
+    return rebooted
 
 
 def _persist_status_result(device_id: int, result: CollectorResult):
@@ -287,15 +367,13 @@ def _persist_status_result(device_id: int, result: CollectorResult):
         device = db.get(Device, device_id)
         if not device:
             return
+        rebooted = _apply_device_vitals(device, result, now)
         existing_ports = {p.port_index: p for p in device.ports}
         for pd in result.ports:
             port = existing_ports.get(pd.port_index)
             if not port:
                 continue
-            prev_oper = port.oper_status
-            if prev_oper is not None and pd.oper_status is not None and prev_oper != pd.oper_status:
-                port.flap_count = (port.flap_count or 0) + 1
-                port.last_flap_at = now
+            _apply_port_health(port, pd, now, rebooted)
             port.oper_status = pd.oper_status
             port.admin_status = pd.admin_status
             port.speed = pd.speed
@@ -317,6 +395,7 @@ async def poll_device(device_id: int) -> bool:
         is_first_poll = device.last_polled is None
         prev_poll_status = device.poll_status
         prev_port_oper = {p.port_index: p.oper_status for p in device.ports}
+        prev_health = _snapshot_health(device)
         prev_macs = {m.mac_address for m in device.mac_entries}
         prev_neighbors = {
             (n.local_port_index, n.remote_system_name or "")
@@ -372,7 +451,8 @@ async def poll_device(device_id: int) -> bool:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             _executor, _generate_events,
-            device_id, prev_poll_status, status, prev_port_oper, prev_macs, prev_neighbors, result
+            device_id, prev_poll_status, status, prev_port_oper, prev_macs, prev_neighbors, result,
+            prev_health,
         )
 
     logger.info("Device %d poll_status=%s", device_id, status)
@@ -403,6 +483,8 @@ def _persist_result(device_id: int, result: CollectorResult):
         if result.firmware_version:
             device.firmware_version = result.firmware_version
 
+        rebooted = _apply_device_vitals(device, result, now)
+
         # ── Ports ──────────────────────────────────────────────────────────
         existing_ports = {p.port_index: p for p in device.ports}
 
@@ -412,11 +494,7 @@ def _persist_result(device_id: int, result: CollectorResult):
                 port = Port(device_id=device_id, port_index=pd.port_index)
                 db.add(port)
 
-            # Flap detection: count link state transitions
-            prev_oper = port.oper_status
-            if prev_oper is not None and pd.oper_status is not None and prev_oper != pd.oper_status:
-                port.flap_count = (port.flap_count or 0) + 1
-                port.last_flap_at = now
+            _apply_port_health(port, pd, now, rebooted)
 
             port.port_name = pd.port_name
             port.port_description = pd.port_description
@@ -425,8 +503,6 @@ def _persist_result(device_id: int, result: CollectorResult):
             port.speed = pd.speed
             port.rx_bytes = pd.rx_bytes
             port.tx_bytes = pd.tx_bytes
-            port.rx_errors = pd.rx_errors
-            port.tx_errors = pd.tx_errors
             port.last_seen = now
             if pd.poe_draw_mw is not None:
                 port.poe_draw_mw = pd.poe_draw_mw
@@ -595,6 +671,8 @@ def _persist_result(device_id: int, result: CollectorResult):
                     tx_bytes=pd.tx_bytes,
                     rx_errors=pd.rx_errors,
                     tx_errors=pd.tx_errors,
+                    rx_discards=pd.rx_discards,
+                    tx_discards=pd.tx_discards,
                     sampled_at=now,
                 ))
 
@@ -702,6 +780,7 @@ def _generate_events(
     prev_macs: set[str],
     prev_neighbors: set[tuple],
     result,  # CollectorResult or None if poll failed
+    prev_health: dict | None = None,
 ):
     """Detect changes vs previous poll and write Event rows. Runs in thread pool."""
     now = datetime.utcnow()
@@ -744,6 +823,84 @@ def _generate_events(
                     device_id=device_id, event_type="port_down",
                     detail=f"Port {port_label} went down", created_at=now,
                 ))
+
+        # ── Port health: error bursts ──────────────────────────────────────
+        PORT_ERROR_EVENT_THRESHOLD = 10
+        prev_err = (prev_health or {}).get("port_err", {})
+        for pd in result.ports:
+            prev_total = prev_err.get(pd.port_index)
+            if prev_total is None or (pd.rx_errors is None and pd.tx_errors is None):
+                continue
+            delta = (pd.rx_errors or 0) + (pd.tx_errors or 0) - prev_total
+            if delta >= PORT_ERROR_EVENT_THRESHOLD:
+                port_label = pd.port_name or str(pd.port_index)
+                events.append(Event(
+                    device_id=device_id, event_type="port_errors",
+                    detail=f"Port {port_label}: {delta} interface errors since last poll",
+                    created_at=now,
+                ))
+
+        # ── PoE device stopped drawing power ───────────────────────────────
+        # Only when this poll returned PoE data at all (walk failure ≠ power loss)
+        if any(pd.poe_draw_mw is not None for pd in result.ports):
+            prev_poe = (prev_health or {}).get("poe_mw", {})
+            for pd in result.ports:
+                prev_mw = prev_poe.get(pd.port_index) or 0
+                if prev_mw >= 1000 and (pd.poe_draw_mw or 0) == 0 and pd.oper_status == 1:
+                    port_label = pd.port_name or str(pd.port_index)
+                    events.append(Event(
+                        device_id=device_id, event_type="poe_dropped",
+                        detail=f"Port {port_label}: PoE device stopped drawing power (was {prev_mw} mW)",
+                        created_at=now,
+                    ))
+
+        # ── Switch vitals ──────────────────────────────────────────────────
+        if prev_health:
+            prev_uptime = prev_health.get("sys_uptime")
+            if (prev_uptime is not None and result.sys_uptime is not None
+                    and result.sys_uptime < prev_uptime):
+                events.append(Event(
+                    device_id=device_id, event_type="device_rebooted",
+                    detail=f"Switch rebooted — uptime reset ({result.sys_uptime // 6000} min ago)",
+                    created_at=now,
+                ))
+
+            for attr, etype, label in (("fans_ok", "fan", "Fan"),
+                                       ("psu_ok", "psu", "Power supply")):
+                prev_ok = prev_health.get(attr)
+                new_ok = getattr(result, attr)
+                if prev_ok is None or new_ok is None or bool(prev_ok) == bool(new_ok):
+                    continue
+                if not new_ok:
+                    events.append(Event(
+                        device_id=device_id, event_type=f"{etype}_failure",
+                        detail=f"{label} failure reported", created_at=now,
+                    ))
+                else:
+                    events.append(Event(
+                        device_id=device_id, event_type=f"{etype}_recovered",
+                        detail=f"{label} recovered", created_at=now,
+                    ))
+
+            HIGH_CPU_THRESHOLD = 90
+            prev_cpu = prev_health.get("cpu_util")
+            if (result.cpu_util is not None and result.cpu_util >= HIGH_CPU_THRESHOLD
+                    and (prev_cpu is None or prev_cpu < HIGH_CPU_THRESHOLD)):
+                events.append(Event(
+                    device_id=device_id, event_type="high_cpu",
+                    detail=f"Management CPU at {result.cpu_util}%", created_at=now,
+                ))
+
+            STP_TCN_THRESHOLD = 5
+            prev_tcn = prev_health.get("stp_top_changes")
+            if result.stp_top_changes is not None and prev_tcn is not None:
+                tcn_delta = result.stp_top_changes - prev_tcn
+                if tcn_delta >= STP_TCN_THRESHOLD:
+                    events.append(Event(
+                        device_id=device_id, event_type="stp_topology_change",
+                        detail=f"{tcn_delta} STP topology changes since last poll",
+                        created_at=now,
+                    ))
 
         # ── MAC address changes ────────────────────────────────────────────
         # Individual MAC events are too noisy (DHCP churn, sleeping clients, etc.)
@@ -814,7 +971,8 @@ def _generate_events(
             device_name = d.snmp_name or d.hostname
 
     # Fire alerts for high-signal events (device status changes only — not MAC churn)
-    alert_event_types = {"device_up", "device_down", "device_degraded"}
+    alert_event_types = {"device_up", "device_down", "device_degraded",
+                         "device_rebooted", "fan_failure", "psu_failure", "high_cpu"}
     for ev in events:
         if ev.event_type in alert_event_types:
             send_alert(device_id, device_name, ev.event_type, ev.detail or "")

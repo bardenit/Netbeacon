@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Bell, Clock, Info, AlertTriangle, CheckCircle2, Trash2, CheckCircle } from 'lucide-react';
+import { Bell, Clock, Info, AlertTriangle, CheckCircle2, Trash2, CheckCircle, Zap, RefreshCw, Cpu, GitMerge } from 'lucide-react';
 import { formatIsoDate } from '../utils';
 
 interface Event {
@@ -119,13 +119,39 @@ export default function EventsView({ apiFetch }: { apiFetch: (url: string, optio
   );
 }
 
+const EVENT_TYPE_ICONS: Record<string, JSX.Element> = {
+  port_errors: <AlertTriangle className="w-4 h-4" />,
+  poe_dropped: <Zap className="w-4 h-4" />,
+  device_rebooted: <RefreshCw className="w-4 h-4" />,
+  fan_failure: <AlertTriangle className="w-4 h-4" />,
+  fan_recovered: <CheckCircle2 className="w-4 h-4" />,
+  psu_failure: <AlertTriangle className="w-4 h-4" />,
+  psu_recovered: <CheckCircle2 className="w-4 h-4" />,
+  high_cpu: <Cpu className="w-4 h-4" />,
+  stp_topology_change: <GitMerge className="w-4 h-4" />,
+};
+
+const EVENT_TYPE_COLORS: Record<string, string> = {
+  port_errors: 'bg-orange-500/10 text-orange-400',
+  poe_dropped: 'bg-orange-500/10 text-orange-400',
+  device_rebooted: 'bg-red/10 text-red',
+  fan_failure: 'bg-red/10 text-red',
+  fan_recovered: 'bg-green/10 text-green',
+  psu_failure: 'bg-red/10 text-red',
+  psu_recovered: 'bg-green/10 text-green',
+  high_cpu: 'bg-red/10 text-red',
+  stp_topology_change: 'bg-yellow/10 text-yellow',
+};
+
 function getEventIcon(type: string) {
+  if (EVENT_TYPE_ICONS[type]) return EVENT_TYPE_ICONS[type];
   if (type.includes('down') || type.includes('error')) return <AlertTriangle className="w-4 h-4" />;
   if (type.includes('up') || type.includes('appeared')) return <CheckCircle2 className="w-4 h-4" />;
   return <Info className="w-4 h-4" />;
 }
 
 function getEventColor(type: string) {
+  if (EVENT_TYPE_COLORS[type]) return EVENT_TYPE_COLORS[type];
   if (type.includes('down') || type.includes('error')) return 'bg-red/10 text-red';
   if (type.includes('up') || type.includes('appeared')) return 'bg-green/10 text-green';
   return 'bg-blue/10 text-blue';

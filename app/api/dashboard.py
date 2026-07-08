@@ -52,10 +52,17 @@ def get_summary(db: Session = Depends(get_db)):
     yesterday = datetime.utcnow() - timedelta(hours=24)
     new_devices = db.query(MacEntry).filter(MacEntry.first_seen >= yesterday).count()
 
-    # Flapping ports (flap_count > 0)
-    flapping = db.query(Port).filter(Port.flap_count > 0).count()
+    # Windowed health counts (24h) — lifetime flap_count is deliberately not used
+    from sqlalchemy import and_, or_
+    flapping = db.query(Port).filter(Port.last_flap_at >= yesterday).count()
+    unhealthy = db.query(Port).filter(or_(
+        Port.last_error_at >= yesterday,
+        and_(Port.oper_status == 1, Port.duplex == 2),
+        and_(Port.oper_status == 1, Port.max_speed_seen > Port.speed),
+    )).count()
 
     return {
+        "unhealthy_ports": unhealthy,
         "total_switches": total_devices,
         "online_switches": online_devices,
         "offline_switches": total_devices - online_devices,
@@ -230,20 +237,103 @@ def new_devices(hours: int = Query(default=24, ge=1, le=8760), db: Session = Dep
     return result[:200]
 
 
-@router.get("/flapping-ports")
-def flapping_ports(db: Session = Depends(get_db)):
-    """Return ports with link flaps, sorted by flap count descending."""
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "info": 3}
+
+
+def _stat_windows(db: Session, port_ids: list[int], cutoff: datetime) -> dict[int, dict]:
+    """Per-port 24h counter deltas (last sample minus first sample, clamped ≥0)."""
+    windows: dict[int, dict] = {}
+    if not port_ids:
+        return windows
+    stats = (
+        db.query(PortStat)
+        .filter(PortStat.port_id.in_(port_ids), PortStat.sampled_at >= cutoff)
+        .order_by(PortStat.sampled_at.asc())
+        .all()
+    )
+    first: dict[int, PortStat] = {}
+    last: dict[int, PortStat] = {}
+    for s in stats:
+        first.setdefault(s.port_id, s)
+        last[s.port_id] = s
+
+    def total(s: PortStat, a: str, b: str) -> int:
+        return (getattr(s, a) or 0) + (getattr(s, b) or 0)
+
+    for pid, f in first.items():
+        l = last[pid]
+        windows[pid] = {
+            "errors_24h": max(0, total(l, "rx_errors", "tx_errors") - total(f, "rx_errors", "tx_errors")),
+            "discards_24h": max(0, total(l, "rx_discards", "tx_discards") - total(f, "rx_discards", "tx_discards")),
+        }
+    return windows
+
+
+@router.get("/port-health")
+def port_health(db: Session = Depends(get_db)):
+    """Ports with active health issues, each with named diagnoses and evidence.
+
+    Diagnoses: bad_cable, errors, downshift, duplex_mismatch, loop_blocked,
+    congestion, flapping (benign activity — unplug/sleep pattern).
+    """
+    from sqlalchemy import and_, or_
+
+    now = datetime.utcnow()
+    day_ago = now - timedelta(hours=24)
+    week_ago = now - timedelta(days=7)
+
     rows = (
         db.query(Port, Device)
         .join(Device, Port.device_id == Device.id)
-        .filter(Port.flap_count > 0)
-        .order_by(Port.flap_count.desc())
-        .limit(100)
+        .filter(or_(
+            Port.last_error_at >= week_ago,
+            Port.last_discard_at >= day_ago,
+            Port.last_flap_at >= day_ago,
+            and_(Port.oper_status == 1, Port.duplex == 2),
+            and_(Port.oper_status == 1, Port.max_speed_seen > Port.speed),
+            and_(Port.oper_status == 1, Port.stp_state == 2),
+        ))
         .all()
     )
 
+    windows = _stat_windows(db, [p.id for p, _ in rows], day_ago)
+
     result = []
     for port, device in rows:
+        w = windows.get(port.id, {})
+        errors_24h = w.get("errors_24h", 0)
+        discards_24h = w.get("discards_24h", 0)
+        up = port.oper_status == 1
+        flapped_24h = port.last_flap_at is not None and port.last_flap_at >= day_ago
+        errored_24h = port.last_error_at is not None and port.last_error_at >= day_ago
+        downshift = up and port.max_speed_seen and port.speed and port.speed < port.max_speed_seen
+        has_errors = errors_24h >= 5 or errored_24h
+
+        diagnoses = []
+        if has_errors and (flapped_24h or downshift):
+            diagnoses.append({"code": "bad_cable", "severity": "critical",
+                              "summary": "Errors + link instability — likely bad cable or connector"})
+        elif has_errors:
+            diagnoses.append({"code": "errors", "severity": "high",
+                              "summary": "Interface errors actively accruing"})
+        if downshift:
+            diagnoses.append({"code": "downshift", "severity": "high",
+                              "summary": "Linked below best-seen speed — possible damaged pair"})
+        if up and port.duplex == 2:
+            diagnoses.append({"code": "duplex_mismatch", "severity": "high",
+                              "summary": "Half duplex — negotiation problem or forced-speed mismatch"})
+        if up and port.stp_state == 2:
+            diagnoses.append({"code": "loop_blocked", "severity": "medium",
+                              "summary": "Port blocked by spanning tree — possible loop"})
+        if discards_24h >= 500 and not has_errors:
+            diagnoses.append({"code": "congestion", "severity": "medium",
+                              "summary": "Packets discarded with no errors — congestion, not cabling"})
+        if flapped_24h and not diagnoses:
+            diagnoses.append({"code": "flapping", "severity": "info",
+                              "summary": "Link transitions with clean counters — likely unplug/sleep"})
+        if not diagnoses:
+            continue
+
         result.append({
             "port_id": port.id,
             "device_id": device.id,
@@ -252,13 +342,51 @@ def flapping_ports(db: Session = Depends(get_db)):
             "port_name": port.port_name,
             "port_index": port.port_index,
             "port_description": port.port_description,
+            "port_type": port.port_type,
             "oper_status": port.oper_status,
+            "diagnoses": diagnoses,
+            "errors_24h": errors_24h,
+            "discards_24h": discards_24h,
             "flap_count": port.flap_count,
             "last_flap_at": port.last_flap_at,
+            "last_error_at": port.last_error_at,
+            "speed": port.speed,
+            "max_speed_seen": port.max_speed_seen,
+            "duplex": port.duplex,
+            "stp_state": port.stp_state,
             "last_mac": port.last_mac,
             "last_hostname": port.last_hostname,
         })
-    return result
+
+    result.sort(key=lambda r: (
+        min(_SEVERITY_RANK[d["severity"]] for d in r["diagnoses"]),
+        -r["errors_24h"],
+    ))
+    return result[:100]
+
+
+@router.get("/vitals")
+def switch_vitals(db: Session = Depends(get_db)):
+    """Per-switch hardware/health vitals (CPU, memory, temperature, fans, PSU, PoE, uptime)."""
+    out = []
+    for d in db.query(Device).order_by(Device.hostname).all():
+        out.append({
+            "device_id": d.id,
+            "hostname": d.hostname,
+            "ip_address": d.ip_address,
+            "poll_status": d.poll_status,
+            "uptime_seconds": d.sys_uptime // 100 if d.sys_uptime is not None else None,
+            "cpu_util": d.cpu_util,
+            "mem_used_pct": d.mem_used_pct,
+            "temperature": d.temperature,
+            "fans_ok": d.fans_ok,
+            "psu_ok": d.psu_ok,
+            "poe_budget_w": d.poe_budget_w,
+            "poe_used_w": d.poe_used_w,
+            "stp_top_changes": d.stp_top_changes,
+            "vitals_updated_at": d.vitals_updated_at,
+        })
+    return out
 
 
 @router.get("/subnet-utilization")
@@ -586,7 +714,7 @@ def site_summary(db: Session = Depends(get_db)):
             s["total_ports"] += 1
             if p.oper_status == 1:
                 s["up_ports"] += 1
-            if (p.flap_count or 0) > 0:
+            if p.last_flap_at is not None and p.last_flap_at >= yesterday:
                 s["flapping_ports"] += 1
 
         s["new_devices_24h"] += new_by_device.get(d.id, 0)
@@ -611,6 +739,8 @@ def port_history(port_id: int, hours: int = Query(default=24, ge=1, le=8760), db
             "tx_bytes": s.tx_bytes,
             "rx_errors": s.rx_errors,
             "tx_errors": s.tx_errors,
+            "rx_discards": s.rx_discards,
+            "tx_discards": s.tx_discards,
         }
         for s in stats
     ]

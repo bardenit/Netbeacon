@@ -39,6 +39,17 @@ class Device(Base):
     poll_status = Column(String, default="unknown")  # ok, degraded, error, unknown
     poll_error = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Switch vitals (best-effort, vendor MIBs; None = not reported)
+    sys_uptime = Column(BigInteger, nullable=True)     # sysUpTime timeticks (1/100 s)
+    cpu_util = Column(Integer, nullable=True)          # percent
+    mem_used_pct = Column(Integer, nullable=True)      # percent
+    temperature = Column(Integer, nullable=True)       # degrees C
+    fans_ok = Column(Boolean, nullable=True)
+    psu_ok = Column(Boolean, nullable=True)
+    poe_budget_w = Column(Integer, nullable=True)      # total PSE power available (W)
+    poe_used_w = Column(Integer, nullable=True)        # PSE power consumed (W)
+    stp_top_changes = Column(BigInteger, nullable=True)  # dot1dStpTopChanges counter
+    vitals_updated_at = Column(DateTime, nullable=True)
 
     ports = relationship("Port", back_populates="device", cascade="all, delete-orphan")
     vlans = relationship("Vlan", back_populates="device", cascade="all, delete-orphan")
@@ -64,6 +75,14 @@ class Port(Base):
     tx_bytes = Column(BigInteger, nullable=True)
     rx_errors = Column(BigInteger, nullable=True)
     tx_errors = Column(BigInteger, nullable=True)
+    rx_discards = Column(BigInteger, nullable=True)
+    tx_discards = Column(BigInteger, nullable=True)
+    duplex = Column(Integer, nullable=True)            # dot3StatsDuplexStatus: 1=unknown, 2=half, 3=full
+    if_last_change = Column(BigInteger, nullable=True) # ifLastChange timeticks
+    max_speed_seen = Column(BigInteger, nullable=True) # highest speed ever negotiated (bits/sec)
+    last_error_at = Column(DateTime, nullable=True)    # last poll where error counters increased
+    last_discard_at = Column(DateTime, nullable=True)  # last poll where discard counters increased
+    stp_state = Column(Integer, nullable=True)         # 1=disabled,2=blocking,3=listening,4=learning,5=forwarding,6=broken
     last_seen = Column(DateTime, default=datetime.utcnow)
     last_mac = Column(String, nullable=True)           # last MAC seen on this port
     last_hostname = Column(String, nullable=True)      # hostname of last connected device
@@ -191,6 +210,8 @@ class PortStat(Base):
     tx_bytes = Column(BigInteger, nullable=True)
     rx_errors = Column(BigInteger, nullable=True)
     tx_errors = Column(BigInteger, nullable=True)
+    rx_discards = Column(BigInteger, nullable=True)
+    tx_discards = Column(BigInteger, nullable=True)
     sampled_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 

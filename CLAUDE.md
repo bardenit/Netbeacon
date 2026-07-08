@@ -20,6 +20,8 @@ A Dockerized network management tool that discovery and visualizes network topol
 - **Advanced Search:** Integrated MAC/IP/Hostname search with **Path-from-Gateway** visualization and "Jump to Faceplate" logic.
 - **SNMP Resilience:** Added automatic retries (2) and robust error handling for fragile switch management CPUs.
 - **Data Stability:** Moved to an **upsert + mark-and-sweep** pruning model to prevent UI flicker during poll cycles.
+- **Port Health Diagnostics:** Error/discard/duplex/`ifLastChange` collection with named diagnoses (bad_cable, downshift, duplex_mismatch, congestion, loop_blocked, flapping) via `GET /api/dashboard/port-health` — replaces the old lifetime flap counter panel.
+- **Switch Vitals:** CPU/memory/temperature/fan/PSU (Extreme private MIB), sysUpTime reboot detection, PoE budget, and STP topology-change tracking via `GET /api/dashboard/vitals`; new event types (port_errors, device_rebooted, fan/psu_failure, high_cpu, poe_dropped, stp_topology_change).
 
 ### Upcoming
 - **SSH Fallback:** Netmiko integration for devices with restricted SNMP access.

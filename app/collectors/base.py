@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 # ── OID constants ─────────────────────────────────────────────────────────────
 
 OID_SYS_DESCR      = "1.3.6.1.2.1.1.1.0"
+OID_SYS_UPTIME     = "1.3.6.1.2.1.1.3.0"
 OID_SYS_NAME       = "1.3.6.1.2.1.1.5.0"
 
 # IF-MIB
@@ -54,6 +55,9 @@ OID_IF_IN_OCTETS    = "1.3.6.1.2.1.2.2.1.10"
 OID_IF_OUT_OCTETS   = "1.3.6.1.2.1.2.2.1.16"
 OID_IF_IN_ERRORS    = "1.3.6.1.2.1.2.2.1.14"
 OID_IF_OUT_ERRORS   = "1.3.6.1.2.1.2.2.1.20"
+OID_IF_IN_DISCARDS  = "1.3.6.1.2.1.2.2.1.13"
+OID_IF_OUT_DISCARDS = "1.3.6.1.2.1.2.2.1.19"
+OID_IF_LAST_CHANGE  = "1.3.6.1.2.1.2.2.1.9"
 OID_IF_NAME         = "1.3.6.1.2.1.31.1.1.1.1"
 OID_IF_ALIAS        = "1.3.6.1.2.1.31.1.1.1.18"
 OID_IF_HC_IN        = "1.3.6.1.2.1.31.1.1.1.6"
@@ -82,8 +86,17 @@ OID_DOT1Q_PVID                = "1.3.6.1.2.1.17.7.1.4.5.1.1"
 # IP-MIB ARP
 OID_ARP_PHYS_ADDRESS = "1.3.6.1.2.1.4.22.1.2"
 
+# EtherLike-MIB — duplex status per port (1=unknown, 2=half, 3=full)
+OID_DOT3_DUPLEX = "1.3.6.1.2.1.10.7.2.1.19"
+
+# BRIDGE-MIB STP
+OID_STP_TOP_CHANGES = "1.3.6.1.2.1.17.2.4.0"       # topology change counter
+OID_STP_PORT_STATE  = "1.3.6.1.2.1.17.2.15.1.3"    # per bridge port: 2=blocking, 5=forwarding
+
 # POWER-ETHERNET-MIB (RFC 3621) — PoE actual power per port (milliwatts)
 OID_POE_ACTUAL_POWER = "1.3.6.1.2.1.105.1.1.1.6"
+OID_POE_MAIN_POWER   = "1.3.6.1.2.1.105.1.3.1.1.2"  # PSE budget per group (W)
+OID_POE_MAIN_CONSUMP = "1.3.6.1.2.1.105.1.3.1.1.4"  # PSE consumption per group (W)
 
 
 # ── Data containers ───────────────────────────────────────────────────────────
@@ -100,6 +113,11 @@ class PortData:
     tx_bytes: int | None = None
     rx_errors: int | None = None
     tx_errors: int | None = None
+    rx_discards: int | None = None
+    tx_discards: int | None = None
+    duplex: int | None = None
+    if_last_change: int | None = None
+    stp_state: int | None = None
     poe_draw_mw: int | None = None
 
 
@@ -150,6 +168,16 @@ class CollectorResult:
     arp_entries: list[ArpData] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     partial: bool = False
+    # Switch vitals (best-effort; None = not reported by this device)
+    sys_uptime: int | None = None       # sysUpTime timeticks
+    cpu_util: int | None = None         # percent
+    mem_used_pct: int | None = None     # percent
+    temperature: int | None = None      # degrees C
+    fans_ok: bool | None = None
+    psu_ok: bool | None = None
+    poe_budget_w: int | None = None
+    poe_used_w: int | None = None
+    stp_top_changes: int | None = None
 
 
 # ── SNMP helpers ──────────────────────────────────────────────────────────────
@@ -413,6 +441,16 @@ class BaseCollector:
         except Exception as e:
             logger.debug("PoE collection failed (non-fatal): %s", e)
 
+        try:
+            await self._collect_stp(result)
+        except Exception as e:
+            logger.debug("STP collection failed (non-fatal): %s", e)
+
+        try:
+            await self._collect_vitals(result)
+        except Exception as e:
+            logger.debug("Vitals collection failed (non-fatal): %s", e)
+
         log.info(
             "Poll complete: %d ports, %d neighbors, %d vlans, %d macs | partial=%s errors=%d",
             len(result.ports), len(result.neighbors), len(result.vlans),
@@ -433,6 +471,14 @@ class BaseCollector:
             logger.getChild(self.host).error("Status poll failed: %s", e)
             result.errors.append(f"interfaces: {e}")
             result.partial = True
+        # sysUpTime is one GET — cheap enough for the light poll, and it gives
+        # fast reboot detection plus a wrap guard for ifLastChange flap detection.
+        try:
+            data = await self._get([OID_SYS_UPTIME])
+            for _, val in data.items():
+                result.sys_uptime = int(val)
+        except Exception:
+            pass
         return result
 
     # ── Convenience wrappers that auto-inject host/community/version/v3_params ──
@@ -529,6 +575,31 @@ class BaseCollector:
                 idx = oid_last_int(oid)
                 if idx in ports_by_idx:
                     ports_by_idx[idx].tx_bytes = int(val)
+
+        # Error/discard counters + last link change (all non-fatal)
+        for base_oid, attr in (
+            (OID_IF_IN_ERRORS, "rx_errors"),
+            (OID_IF_OUT_ERRORS, "tx_errors"),
+            (OID_IF_IN_DISCARDS, "rx_discards"),
+            (OID_IF_OUT_DISCARDS, "tx_discards"),
+            (OID_IF_LAST_CHANGE, "if_last_change"),
+        ):
+            try:
+                for oid, val in (await self._walk(base_oid)).items():
+                    idx = oid_last_int(oid)
+                    if idx in ports_by_idx:
+                        setattr(ports_by_idx[idx], attr, int(val))
+            except Exception as e:
+                logger.getChild(self.host).debug("%s walk failed (non-fatal): %s", attr, e)
+
+        # Duplex (EtherLike-MIB, indexed by ifIndex)
+        try:
+            for oid, val in (await self._walk(OID_DOT3_DUPLEX)).items():
+                idx = oid_last_int(oid)
+                if idx in ports_by_idx:
+                    ports_by_idx[idx].duplex = int(val)
+        except Exception as e:
+            logger.getChild(self.host).debug("duplex walk failed (non-fatal): %s", e)
 
         result.ports = list(ports_by_idx.values())
 
@@ -744,3 +815,45 @@ class BaseCollector:
                         break
             if port:
                 port.poe_draw_mw = mw
+
+        # PSE budget/consumption (Watts, summed across power groups)
+        try:
+            budget = sum(int(v) for v in (await self._walk(OID_POE_MAIN_POWER, timeout=5)).values())
+            used = sum(int(v) for v in (await self._walk(OID_POE_MAIN_CONSUMP, timeout=5)).values())
+            if budget > 0:
+                result.poe_budget_w = budget
+                result.poe_used_w = used
+        except Exception as e:
+            logger.getChild(self.host).debug("PoE main PSE walk failed (non-fatal): %s", e)
+
+    async def _collect_stp(self, result: CollectorResult):
+        """STP topology-change counter + per-port STP state (best-effort)."""
+        try:
+            data = await self._get([OID_STP_TOP_CHANGES])
+            for _, val in data.items():
+                result.stp_top_changes = int(val)
+        except Exception as e:
+            logger.getChild(self.host).debug("STP top-changes failed (non-fatal): %s", e)
+
+        # Per-port state is indexed by bridge port number — translate to ifIndex
+        if not result.bridge_to_ifindex or not result.ports:
+            return
+        ports_by_idx = {p.port_index: p for p in result.ports}
+        try:
+            for oid, val in (await self._walk(OID_STP_PORT_STATE)).items():
+                bridge_port = oid_last_int(oid)
+                ifidx = result.bridge_to_ifindex.get(bridge_port)
+                if ifidx in ports_by_idx:
+                    ports_by_idx[ifidx].stp_state = int(val)
+        except Exception as e:
+            logger.getChild(self.host).debug("STP port-state walk failed (non-fatal): %s", e)
+
+    async def _collect_vitals(self, result: CollectorResult):
+        """Device health metrics. Base class collects sysUpTime only;
+        vendor subclasses add CPU/memory/temperature/fan/PSU."""
+        try:
+            data = await self._get([OID_SYS_UPTIME])
+            for _, val in data.items():
+                result.sys_uptime = int(val)
+        except Exception as e:
+            logger.getChild(self.host).debug("sysUpTime failed (non-fatal): %s", e)

@@ -2,9 +2,9 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Layers, Activity, Search, ArrowUp, ArrowDown, ChevronRight, ChevronDown,
   Server, Network, Hash, Zap, AlertCircle, Shield, Globe,
-  TrendingUp, Clock, AlertTriangle, XCircle, GitMerge, MapPin, Moon
+  TrendingUp, Clock, AlertTriangle, XCircle, GitMerge, MapPin, Moon, HeartPulse
 } from 'lucide-react';
-import { formatBytes, formatIsoDate, SubnetDef } from '../utils';
+import { formatBytes, formatIsoDate, formatSpeed, SubnetDef } from '../utils';
 import NetworkBadge from '../components/NetworkBadge';
 
 interface Summary {
@@ -18,6 +18,7 @@ interface Summary {
   total_macs: number;
   new_devices_24h: number;
   flapping_ports: number;
+  unhealthy_ports: number;
 }
 
 interface VlanSummary {
@@ -55,18 +56,51 @@ interface NewDevice {
   first_seen: string;
 }
 
-interface FlappingPort {
+interface PortDiagnosis {
+  code: string;
+  severity: 'critical' | 'high' | 'medium' | 'info';
+  summary: string;
+}
+
+interface PortHealthEntry {
   port_id: number;
-  port_index: number;
   device_id: number;
   device_hostname: string;
+  device_ip: string;
   port_name: string;
+  port_index: number;
   port_description?: string;
+  port_type?: string;
   oper_status: number;
+  diagnoses: PortDiagnosis[];
+  errors_24h: number;
+  discards_24h: number;
   flap_count: number;
   last_flap_at?: string;
+  last_error_at?: string;
+  speed?: number;
+  max_speed_seen?: number;
+  duplex?: number;
+  stp_state?: number;
   last_mac?: string;
   last_hostname?: string;
+}
+
+interface SwitchVitals {
+  device_id: number;
+  hostname: string;
+  ip_address: string;
+  poll_status: string;
+  uptime_seconds?: number;
+  cpu_util?: number;
+  mem_used_pct?: number;
+  temperature?: number;
+  fans_ok?: boolean | null;
+  psu_ok?: boolean | null;
+  poe_budget_w?: number;
+  poe_used_w?: number;
+  stp_top_changes?: number;
+  vitals_updated_at?: string;
 }
 
 interface SubnetUtil {
@@ -122,7 +156,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
   const [vlans, setVlans] = useState<VlanSummary[]>([]);
   const [utils, setUtils] = useState<PortUtil[]>([]);
   const [newDevices, setNewDevices] = useState<NewDevice[]>([]);
-  const [flappingPorts, setFlappingPorts] = useState<FlappingPort[]>([]);
+  const [portHealth, setPortHealth] = useState<PortHealthEntry[]>([]);
+  const [vitals, setVitals] = useState<SwitchVitals[]>([]);
   const [subnetUtils, setSubnetUtils] = useState<SubnetUtil[]>([]);
   const [darkPorts, setDarkPorts] = useState<DarkPort[]>([]);
   const [departedDevices, setDepartedDevices] = useState<DepartedDevice[]>([]);
@@ -146,13 +181,14 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
   const fetchData = async () => {
     setIsLoading(true);
     try {
-      const [sumRes, vlansRes, utilRes, newDevRes, flapsRes, subnetRes,
+      const [sumRes, vlansRes, utilRes, newDevRes, portHealthRes, vitalsRes, subnetRes,
              darkRes, departedRes, errRes, conflictsRes, gapsRes, sitesRes] = await Promise.all([
         apiFetch('/api/dashboard/summary'),
         apiFetch('/api/dashboard/vlans'),
         apiFetch('/api/dashboard/utilization'),
         apiFetch('/api/dashboard/new-devices'),
-        apiFetch('/api/dashboard/flapping-ports'),
+        apiFetch('/api/dashboard/port-health'),
+        apiFetch('/api/dashboard/vitals'),
         apiFetch('/api/dashboard/subnet-utilization'),
         apiFetch('/api/dashboard/dark-ports'),
         apiFetch('/api/dashboard/departed-devices'),
@@ -161,10 +197,10 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
         apiFetch('/api/dashboard/vlan-gaps'),
         apiFetch('/api/dashboard/sites'),
       ]);
-      const [sumData, vlansData, utilData, newDevData, flapsData, subnetData,
+      const [sumData, vlansData, utilData, newDevData, portHealthData, vitalsData, subnetData,
               darkData, departedData, errData, conflictsData, gapsData, sitesData] = await Promise.all([
         sumRes.json(), vlansRes.json(), utilRes.json(),
-        newDevRes.json(), flapsRes.json(), subnetRes.json(),
+        newDevRes.json(), portHealthRes.json(), vitalsRes.json(), subnetRes.json(),
         darkRes.json(), departedRes.json(), errRes.json(),
         conflictsRes.json(), gapsRes.json(), sitesRes.json(),
       ]);
@@ -172,7 +208,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
       setVlans(Array.isArray(vlansData) ? vlansData : []);
       setUtils(Array.isArray(utilData) ? utilData : []);
       setNewDevices(Array.isArray(newDevData) ? newDevData : []);
-      setFlappingPorts(Array.isArray(flapsData) ? flapsData : []);
+      setPortHealth(Array.isArray(portHealthData) ? portHealthData : []);
+      setVitals(Array.isArray(vitalsData) ? vitalsData : []);
       setSubnetUtils(Array.isArray(subnetData) ? subnetData : []);
       setDarkPorts(Array.isArray(darkData) ? darkData : []);
       setDepartedDevices(Array.isArray(departedData) ? departedData : []);
@@ -206,6 +243,18 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
         return sortOrder === 'asc' ? valA - valB : valB - valA;
       });
   }, [utils, utilSearch, sortKey, sortOrder]);
+
+  const visibleVitals = useMemo(() => vitals.filter(v => {
+    if (v.poll_status === 'error') return true;
+    return v.uptime_seconds != null || v.cpu_util != null || v.mem_used_pct != null ||
+      v.temperature != null || v.fans_ok != null || v.psu_ok != null ||
+      v.poe_budget_w != null || v.poe_used_w != null;
+  }), [vitals]);
+
+  const vitalsWarnCount = useMemo(() => vitals.filter(v =>
+    (v.cpu_util ?? 0) >= 90 || (v.mem_used_pct ?? 0) >= 90 || (v.temperature ?? 0) >= 60 ||
+    v.fans_ok === false || v.psu_ok === false
+  ).length, [vitals]);
 
   function handleSort(k: string) {
     if (sortKey === k) setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
@@ -271,7 +320,8 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
         <SummaryCard icon={<Hash className="w-4 h-4" />} label="Active MACs" value={summary?.total_macs ?? 0} sub="last 2h" color="accent2" />
         <SummaryCard icon={<Network className="w-4 h-4" />} label="VLANs" value={summary?.total_vlans ?? 0} sub="across all" color="yellow" />
         <SummaryCard icon={<Shield className="w-4 h-4" />} label="New Devices" value={summary?.new_devices_24h ?? 0} sub="last 24h" color={summary?.new_devices_24h ? "red" : "green"} onClick={() => setActiveSection(activeSection === 'new' ? null : 'new')} active={activeSection === 'new'} />
-        <SummaryCard icon={<AlertTriangle className="w-4 h-4" />} label="Link Flaps" value={summary?.flapping_ports ?? 0} sub="ports affected" color={summary?.flapping_ports ? "yellow" : "green"} onClick={() => setActiveSection(activeSection === 'flaps' ? null : 'flaps')} active={activeSection === 'flaps'} />
+        <SummaryCard icon={<AlertTriangle className="w-4 h-4" />} label="Port Health" value={summary?.unhealthy_ports ?? 0} sub="ports with issues" color={portHealth.some(p => p.diagnoses.some(d => d.severity === 'critical')) ? "red" : (summary?.unhealthy_ports ?? 0) > 0 ? "yellow" : "green"} onClick={() => setActiveSection(activeSection === 'porthealth' ? null : 'porthealth')} active={activeSection === 'porthealth'} />
+        <SummaryCard icon={<HeartPulse className="w-4 h-4" />} label="Switch Vitals" value={vitalsWarnCount} sub="switches with warnings" color={vitalsWarnCount > 0 ? "red" : "green"} onClick={() => setActiveSection(activeSection === 'vitals' ? null : 'vitals')} active={activeSection === 'vitals'} />
         <SummaryCard icon={<XCircle className="w-4 h-4" />} label="Error Ports" value={errorPorts.length} sub="with errors" color={errorPorts.length > 0 ? "red" : "green"} onClick={() => setActiveSection(activeSection === 'errors' ? null : 'errors')} active={activeSection === 'errors'} />
         <SummaryCard icon={<GitMerge className="w-4 h-4" />} label="IP Conflicts" value={ipConflicts.length} sub="duplicate IPs" color={ipConflicts.length > 0 ? "red" : "green"} onClick={() => setActiveSection(activeSection === 'conflicts' ? null : 'conflicts')} active={activeSection === 'conflicts'} />
       </section>
@@ -323,27 +373,26 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
         </section>
       )}
 
-      {/* Flapping Ports Panel */}
-      {activeSection === 'flaps' && (
+      {/* Port Health Panel */}
+      {activeSection === 'porthealth' && (
         <section className="flex flex-col gap-3 animate-in fade-in slide-in-from-top-2 duration-200">
-          <SectionHeader icon={<AlertTriangle className="w-4 h-4 text-yellow" />} title="Link Flapping Ports" count={flappingPorts.length} />
-          {flappingPorts.length === 0 ? (
-            <EmptyState icon={<Activity className="w-8 h-8" />} text="No link flaps detected." />
+          <SectionHeader icon={<AlertTriangle className="w-4 h-4 text-yellow" />} title="Port Health" count={portHealth.length} />
+          {portHealth.length === 0 ? (
+            <EmptyState icon={<Activity className="w-8 h-8" />} text="No port issues detected — all clean." />
           ) : (
             <div className="bg-surface border border-border rounded-xl overflow-hidden">
               <table className="w-full text-sm">
                 <thead className="bg-surface2 text-[11px] font-bold text-text2 uppercase tracking-wider">
                   <tr>
                     <th className="px-4 py-3 text-left">Switch · Port</th>
-                    <th className="px-4 py-3 text-left">Flaps</th>
-                    <th className="px-4 py-3 text-left">Last Flap</th>
-                    <th className="px-4 py-3 text-left">Status</th>
+                    <th className="px-4 py-3 text-left">Diagnosis</th>
+                    <th className="px-4 py-3 text-left">Evidence</th>
                     <th className="px-4 py-3 text-left">Last Device</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {flappingPorts.map((p) => (
-                    <tr key={p.port_id} className="hover:bg-accent/5 transition-colors">
+                  {portHealth.map((p) => (
+                    <tr key={p.port_id} className="hover:bg-accent/5 transition-colors align-top">
                       <td className="px-4 py-3 text-xs">
                         <button
                           onClick={() => onJumpToFaceplate(p.device_id, p.port_index)}
@@ -353,19 +402,105 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                           <span className="text-accent"> · {p.port_name}</span>
                         </button>
                         {p.port_description && <div className="text-text2 text-[10px]">{p.port_description}</div>}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="px-2 py-0.5 bg-yellow/20 text-yellow font-bold text-xs rounded">{p.flap_count}</span>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-text2">{formatIsoDate(p.last_flap_at, 'datetime')}</td>
-                      <td className="px-4 py-3">
-                        <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${p.oper_status === 1 ? 'bg-green/20 text-green' : 'bg-red/20 text-red'}`}>
+                        <span className={`inline-block mt-1 px-2 py-0.5 text-[10px] font-bold rounded ${p.oper_status === 1 ? 'bg-green/20 text-green' : 'bg-red/20 text-red'}`}>
                           {p.oper_status === 1 ? 'UP' : 'DOWN'}
                         </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-col gap-1.5">
+                          {p.diagnoses.map((d, i) => (
+                            <div key={i} className="flex items-start gap-1.5">
+                              <span className={`shrink-0 px-1.5 py-0.5 text-[9px] font-bold rounded uppercase ${SEVERITY_COLORS[d.severity] || SEVERITY_COLORS.info}`}>{d.severity}</span>
+                              <span className="text-[11px] text-text2">{d.summary}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-[11px] text-text2 space-y-0.5">
+                        {p.errors_24h > 0 && <div>Errors (24h): <span className="text-red font-bold">{p.errors_24h}</span></div>}
+                        {p.discards_24h > 0 && <div>Discards (24h): <span className="text-yellow font-bold">{p.discards_24h}</span></div>}
+                        {p.max_speed_seen != null && p.speed != null && p.speed < p.max_speed_seen && (
+                          <div className="text-orange-400">Downshifted: linked at {formatSpeed(p.speed)}, best seen {formatSpeed(p.max_speed_seen)}</div>
+                        )}
+                        {p.duplex === 2 && <div className="text-red">Half duplex</div>}
+                        {p.last_flap_at && <div>Last flap: {relativeTime(p.last_flap_at)}</div>}
+                        {p.last_error_at && <div>Last error: {relativeTime(p.last_error_at)}</div>}
                       </td>
                       <td className="px-4 py-3 text-xs">
                         <div className="font-mono text-text2">{p.last_mac || '—'}</div>
                         {p.last_hostname && <div className="text-accent">{p.last_hostname}</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Switch Vitals Panel */}
+      {activeSection === 'vitals' && (
+        <section className="flex flex-col gap-3 animate-in fade-in slide-in-from-top-2 duration-200">
+          <SectionHeader icon={<HeartPulse className="w-4 h-4 text-accent2" />} title="Switch Vitals" count={vitals.length} />
+          {visibleVitals.length === 0 ? (
+            <EmptyState icon={<HeartPulse className="w-8 h-8" />} text="No vitals data reported yet." />
+          ) : (
+            <div className="bg-surface border border-border rounded-xl overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-surface2 text-[11px] font-bold text-text2 uppercase tracking-wider">
+                  <tr>
+                    <th className="px-4 py-3 text-left">Switch</th>
+                    <th className="px-4 py-3 text-left">Uptime</th>
+                    <th className="px-4 py-3 text-left">CPU</th>
+                    <th className="px-4 py-3 text-left">Mem</th>
+                    <th className="px-4 py-3 text-left">Temp</th>
+                    <th className="px-4 py-3 text-left">Fan / PSU</th>
+                    <th className="px-4 py-3 text-left">PoE</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {visibleVitals.map((v) => (
+                    <tr key={v.device_id} className="hover:bg-accent/5 transition-colors">
+                      <td className="px-4 py-3 text-xs">
+                        <button onClick={() => onJumpToFaceplate(v.device_id)} className="text-left hover:underline group">
+                          <span className="font-medium text-white group-hover:text-accent transition-colors">{v.hostname}</span>
+                        </button>
+                        {v.poll_status === 'error' && (
+                          <div className="mt-1"><span className="px-2 py-0.5 bg-red/20 text-red text-[10px] font-bold rounded">ERROR</span></div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-text2">{humanizeUptime(v.uptime_seconds)}</td>
+                      <td className="px-4 py-3 text-xs">
+                        <span className={`font-bold ${v.cpu_util == null ? 'text-text2' : v.cpu_util >= 90 ? 'text-red' : v.cpu_util >= 70 ? 'text-yellow' : 'text-text2'}`}>
+                          {v.cpu_util != null ? `${v.cpu_util}%` : '—'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        <span className={`font-bold ${v.mem_used_pct == null ? 'text-text2' : v.mem_used_pct >= 90 ? 'text-red' : v.mem_used_pct >= 70 ? 'text-yellow' : 'text-text2'}`}>
+                          {v.mem_used_pct != null ? `${v.mem_used_pct}%` : '—'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        <span className={`font-bold ${v.temperature == null ? 'text-text2' : v.temperature >= 60 ? 'text-red' : 'text-text2'}`}>
+                          {v.temperature != null ? `${v.temperature}°C` : '—'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex gap-1">
+                          <VitalChip label="FAN" ok={v.fans_ok} />
+                          <VitalChip label="PSU" ok={v.psu_ok} />
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        {v.poe_budget_w != null && v.poe_used_w != null ? (
+                          <div className="flex items-center gap-2">
+                            <span className="text-text2 w-16">{v.poe_used_w.toFixed(0)} / {v.poe_budget_w.toFixed(0)} W</span>
+                            <div className="flex-1 max-w-[70px] h-1.5 bg-surface2 rounded-full overflow-hidden">
+                              <div className={`h-full rounded-full ${v.poe_used_w / v.poe_budget_w > 0.9 ? 'bg-red' : 'bg-accent2'}`} style={{ width: `${Math.min(100, (v.poe_used_w / v.poe_budget_w) * 100)}%` }} />
+                            </div>
+                          </div>
+                        ) : <span className="text-text2">—</span>}
                       </td>
                     </tr>
                   ))}
@@ -833,6 +968,29 @@ function EmptyState({ icon, text }: any) {
       <p className="text-sm">{text}</p>
     </div>
   );
+}
+
+const SEVERITY_COLORS: Record<string, string> = {
+  critical: 'bg-red/20 text-red',
+  high: 'bg-orange-500/20 text-orange-400',
+  medium: 'bg-yellow/20 text-yellow',
+  info: 'bg-surface2 text-text2',
+};
+
+function humanizeUptime(seconds?: number | null): string {
+  if (seconds == null) return '—';
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  if (days > 0) return `${days}d ${hours}h`;
+  const mins = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+function VitalChip({ label, ok }: { label: string, ok?: boolean | null }) {
+  const cls = ok == null ? 'bg-surface2 text-text2' : ok ? 'bg-green/20 text-green' : 'bg-red/20 text-red';
+  const text = ok == null ? '—' : ok ? 'OK' : 'FAIL';
+  return <span className={`px-1.5 py-0.5 text-[9px] font-bold rounded ${cls}`}>{label} {text}</span>;
 }
 
 function relativeTime(isoStr: string): string {

@@ -22,6 +22,12 @@ interface Port {
   tx_bytes: number | null;
   rx_errors: number | null;
   tx_errors: number | null;
+  rx_discards?: number | null;
+  tx_discards?: number | null;
+  duplex?: number | null;
+  max_speed_seen?: number | null;
+  last_error_at?: string;
+  stp_state?: number | null;
   vlans: PortVlan[];
   lldp_neighbor?: string;
   lldp_neighbor_chassis_id?: string;
@@ -360,7 +366,27 @@ export default function FaceplateView({ initialParams, onParamsConsumed, apiFetc
                     <DetailRow label="Speed" value={formatSpeed(selectedPort.speed)} />
                     <DetailRow label="RX Bytes" value={formatBytes(selectedPort.rx_bytes)} />
                     <DetailRow label="TX Bytes" value={formatBytes(selectedPort.tx_bytes)} />
-                    {selectedPort.rx_errors != null && <DetailRow label="RX Errors" value={selectedPort.rx_errors.toString()} color={selectedPort.rx_errors > 0 ? 'text-red' : ''} />}
+                    {(() => {
+                      const errRecent = isRecentTimestamp(selectedPort.last_error_at);
+                      const hasErrors = (selectedPort.rx_errors ?? 0) > 0 || (selectedPort.tx_errors ?? 0) > 0;
+                      return (selectedPort.rx_errors != null || selectedPort.tx_errors != null) && (
+                        <DetailRow
+                          label="Errors (RX/TX)"
+                          value={`${selectedPort.rx_errors ?? 0} / ${selectedPort.tx_errors ?? 0}`}
+                          color={hasErrors && errRecent ? 'text-red' : hasErrors ? 'text-yellow' : ''}
+                        />
+                      );
+                    })()}
+                    {((selectedPort.rx_discards ?? 0) > 0 || (selectedPort.tx_discards ?? 0) > 0) && (
+                      <DetailRow label="Discards (RX/TX)" value={`${selectedPort.rx_discards ?? 0} / ${selectedPort.tx_discards ?? 0}`} color="text-yellow" />
+                    )}
+                    <DetailRow label="Duplex" value={selectedPort.duplex === 3 ? 'Full' : selectedPort.duplex === 2 ? 'Half' : '—'} color={selectedPort.duplex === 2 ? 'text-red' : ''} />
+                    {selectedPort.max_speed_seen != null && selectedPort.speed != null && selectedPort.speed < selectedPort.max_speed_seen && (
+                      <div className="text-[11px] text-orange-400 py-1">Downshifted: linked at {formatSpeed(selectedPort.speed)}, best seen {formatSpeed(selectedPort.max_speed_seen)}</div>
+                    )}
+                    {selectedPort.stp_state === 2 && (
+                      <div className="text-[11px] text-yellow py-1">STP blocking</div>
+                    )}
                   </div>
                 </div>
 
@@ -561,6 +587,12 @@ export default function FaceplateView({ initialParams, onParamsConsumed, apiFetc
       )}
     </div>
   );
+}
+
+function isRecentTimestamp(isoStr?: string | null, withinHours = 24): boolean {
+  if (!isoStr) return false;
+  const diff = Date.now() - new Date(isoStr + 'Z').getTime();
+  return diff >= 0 && diff <= withinHours * 3600000;
 }
 
 // Keywords matched against LLDP remote system name (case-insensitive)
