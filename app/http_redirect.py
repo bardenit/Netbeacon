@@ -16,6 +16,10 @@ _ALLOWED_HOSTS: set[str] = set(
 
 
 class RedirectHandler(http.server.BaseHTTPRequestHandler):
+    # No Python/BaseHTTP version fingerprint in the Server header
+    server_version = "NetBeacon"
+    sys_version = ""
+
     def do_GET(self): self._redirect()
     def do_POST(self): self._redirect()
     def do_HEAD(self): self._redirect()
