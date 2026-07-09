@@ -24,7 +24,8 @@ from app import stream
 from app.config import get_config
 from app.database import SessionLocal
 from app.alerts import send_alert
-from app.models import ArpEntry, Device, Event, MacEntry, Neighbor, Port, PortMacHistory, PortStat, PortVlan, Vlan, is_fortigate
+from app.models import (ArpEntry, Device, DeviceReboot, DeviceStat, Event, MacEntry, Neighbor,
+                        Port, PortMacHistory, PortStat, PortVlan, Vlan, is_fortigate)
 from app.collectors import get_collector
 from app.collectors.base import CollectorResult, bitmap_to_port_set
 
@@ -236,7 +237,10 @@ async def poll_device_status(device_id: int) -> bool:
         collector_class = get_collector(vendor)
         collector = collector_class(host=host, community=community, version=version,
                                     v3_params=v3_params)
+        import time
+        t0 = time.monotonic()
         result: CollectorResult = await collector.collect_status()
+        result.poll_rtt_ms = int((time.monotonic() - t0) * 1000)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(_executor, _persist_status_result, device_id, result)
 
@@ -282,6 +286,11 @@ def _snapshot_health(device) -> dict:
     """Pre-poll snapshot of counters/vitals used for delta-based event generation."""
     return {
         "is_fortigate": is_fortigate(device),
+        "last_polled": device.last_polled,
+        "poll_rtt_ms": device.poll_rtt_ms,
+        "temperature": device.temperature,
+        "mac_port": {m.mac_address: m.port_index for m in device.mac_entries},
+        "port_bcast": {p.port_index: p.rx_broadcast for p in device.ports},
         "port_err": {
             p.port_index: (p.rx_errors or 0) + (p.tx_errors or 0)
             for p in device.ports
@@ -332,7 +341,7 @@ def _apply_port_health(port: Port, pd, now: datetime, rebooted: bool):
     # Copy health fields (only when the walk returned data — None means the
     # walk failed and we keep the previous baseline)
     for attr in ("rx_errors", "tx_errors", "rx_discards", "tx_discards",
-                 "duplex", "if_last_change", "stp_state"):
+                 "duplex", "if_last_change", "stp_state", "rx_broadcast"):
         val = getattr(pd, attr)
         if val is not None:
             setattr(port, attr, val)
@@ -381,6 +390,9 @@ def _persist_status_result(device_id: int, result: CollectorResult):
             port.rx_bytes = pd.rx_bytes
             port.tx_bytes = pd.tx_bytes
             port.last_seen = now
+        if result.poll_rtt_ms is not None and result.ports:
+            device.poll_rtt_ms = result.poll_rtt_ms
+            db.add(DeviceStat(device_id=device_id, poll_rtt_ms=result.poll_rtt_ms, sampled_at=now))
         db.commit()
 
 
@@ -485,6 +497,10 @@ def _persist_result(device_id: int, result: CollectorResult):
             device.firmware_version = result.firmware_version
 
         rebooted = _apply_device_vitals(device, result, now)
+        if result.cpu_util is not None or result.mem_used_pct is not None or result.temperature is not None:
+            db.add(DeviceStat(device_id=device_id, cpu_util=result.cpu_util,
+                              mem_used_pct=result.mem_used_pct, temperature=result.temperature,
+                              sampled_at=now))
 
         # ── Ports ──────────────────────────────────────────────────────────
         existing_ports = {p.port_index: p for p in device.ports}
@@ -674,6 +690,7 @@ def _persist_result(device_id: int, result: CollectorResult):
                     tx_errors=pd.tx_errors,
                     rx_discards=pd.rx_discards,
                     tx_discards=pd.tx_discards,
+                    rx_broadcast=pd.rx_broadcast,
                     sampled_at=now,
                 ))
 
@@ -731,6 +748,8 @@ def _prune_stale_data():
 
         db.query(MacEntry).filter(MacEntry.last_seen < cutoff).delete()
         db.query(PortStat).filter(PortStat.sampled_at < stat_cutoff).delete()
+        vitals_cutoff = datetime.utcnow() - timedelta(days=7)
+        db.query(DeviceStat).filter(DeviceStat.sampled_at < vitals_cutoff).delete()
         db.commit()
     logger.info("Pruned stale records (Neighbor/MAC older than 2h, PortStat older than 48h)")
 
@@ -773,6 +792,20 @@ def _update_port_vlans(db: Session, port_by_idx: dict, vlan_by_id: dict,
             db.add(PortVlan(port_id=port.id, vlan_id=vlan.id, tagged=tagged, last_seen=now))
 
 
+def _recent_event_exists(event_type: str, device_id: int, hours: int, detail_contains: str = "") -> bool:
+    """Dedup guard: has this event already fired for this device recently?"""
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    with SessionLocal() as db:
+        q = db.query(Event).filter(
+            Event.device_id == device_id,
+            Event.event_type == event_type,
+            Event.created_at >= cutoff,
+        )
+        if detail_contains:
+            q = q.filter(Event.detail.contains(detail_contains))
+        return db.query(q.exists()).scalar()
+
+
 def _generate_events(
     device_id: int,
     prev_poll_status: str,
@@ -786,6 +819,7 @@ def _generate_events(
     """Detect changes vs previous poll and write Event rows. Runs in thread pool."""
     now = datetime.utcnow()
     events: list[Event] = []
+    reboot_uptime_before_s: int | None = None
 
     # ── Device status change ───────────────────────────────────────────────
     if prev_poll_status != new_poll_status:
@@ -862,6 +896,7 @@ def _generate_events(
             prev_uptime = prev_health.get("sys_uptime")
             if (prev_uptime is not None and result.sys_uptime is not None
                     and result.sys_uptime < prev_uptime):
+                reboot_uptime_before_s = prev_uptime // 100
                 events.append(Event(
                     device_id=device_id, event_type="device_rebooted",
                     detail=f"Switch rebooted — uptime reset ({result.sys_uptime // 6000} min ago)",
@@ -904,6 +939,105 @@ def _generate_events(
                         detail=f"{tcn_delta} STP topology changes since last poll",
                         created_at=now,
                     ))
+
+        # ── Slow SNMP: management plane degrading (status polls carry RTT) ─
+        if result.poll_rtt_ms is not None and prev_health:
+            with SessionLocal() as db:
+                rtts = sorted(r[0] for r in db.query(DeviceStat.poll_rtt_ms).filter(
+                    DeviceStat.device_id == device_id,
+                    DeviceStat.poll_rtt_ms.isnot(None),
+                    DeviceStat.sampled_at >= now - timedelta(hours=24),
+                ).all())
+            if len(rtts) >= 10:
+                median = rtts[len(rtts) // 2]
+                if (result.poll_rtt_ms > max(500, 5 * median)
+                        and not _recent_event_exists("slow_snmp", device_id, 6)):
+                    events.append(Event(
+                        device_id=device_id, event_type="slow_snmp",
+                        detail=f"SNMP response {result.poll_rtt_ms} ms vs 24h median {median} ms — management plane degrading?",
+                        created_at=now,
+                    ))
+
+        # ── Temperature rate-of-rise (cooling failure) ─────────────────────
+        if result.temperature is not None and prev_health:
+            with SessionLocal() as db:
+                old = db.query(DeviceStat.temperature).filter(
+                    DeviceStat.device_id == device_id,
+                    DeviceStat.temperature.isnot(None),
+                    DeviceStat.sampled_at <= now - timedelta(minutes=50),
+                    DeviceStat.sampled_at >= now - timedelta(hours=3),
+                ).order_by(DeviceStat.sampled_at.desc()).first()
+            if (old and result.temperature - old[0] >= 8
+                    and not _recent_event_exists("temp_rising", device_id, 6)):
+                events.append(Event(
+                    device_id=device_id, event_type="temp_rising",
+                    detail=f"Temperature climbing fast: {old[0]}°C → {result.temperature}°C in ~1h — check cooling",
+                    created_at=now,
+                ))
+
+        # ── Broadcast storm ────────────────────────────────────────────────
+        prev_bcast = (prev_health or {}).get("port_bcast", {})
+        prev_polled = (prev_health or {}).get("last_polled")
+        if prev_bcast and prev_polled:
+            elapsed = max((now - prev_polled).total_seconds(), 1.0)
+            for pd in result.ports:
+                pb = prev_bcast.get(pd.port_index)
+                if pb is None or pd.rx_broadcast is None or pd.rx_broadcast < pb:
+                    continue
+                rate = (pd.rx_broadcast - pb) / elapsed
+                if rate >= 1000 and not _recent_event_exists("broadcast_storm", device_id, 1):
+                    port_label = pd.port_name or str(pd.port_index)
+                    events.append(Event(
+                        device_id=device_id, event_type="broadcast_storm",
+                        detail=f"Port {port_label}: broadcast storm — {int(rate)} broadcasts/sec inbound",
+                        created_at=now,
+                    ))
+                    break  # one storm event per device per poll
+
+        # ── MAC anomalies: duplicates (loop/spoof) and moves ───────────────
+        if result.mac_entries and prev_health:
+            uplinks = {result.bridge_to_ifindex.get(nd.local_port_index, nd.local_port_index)
+                       for nd in result.neighbors}
+            port_names = {p.port_index: (p.port_name or str(p.port_index)) for p in result.ports}
+            macs_per_port: dict[int, int] = {}
+            for md in result.mac_entries:
+                macs_per_port[md.port_index] = macs_per_port.get(md.port_index, 0) + 1
+
+            def _access_port(idx: int) -> bool:
+                # Uplinks and multi-MAC ports (APs, hubs, daisy chains) are excluded
+                return idx not in uplinks and macs_per_port.get(idx, 0) <= 3
+
+            by_mac: dict[str, set[int]] = {}
+            for md in result.mac_entries:
+                if _access_port(md.port_index):
+                    by_mac.setdefault(md.mac_address, set()).add(md.port_index)
+
+            for mac, idxs in by_mac.items():
+                if len(idxs) >= 2 and not _recent_event_exists("mac_duplicate", device_id, 24, mac):
+                    plist = ", ".join(port_names.get(i, str(i)) for i in sorted(idxs))
+                    events.append(Event(
+                        device_id=device_id, event_type="mac_duplicate",
+                        detail=f"{mac} on {len(idxs)} access ports at once ({plist}) — possible loop or spoofed MAC",
+                        created_at=now,
+                    ))
+
+            prev_mac_port = prev_health.get("mac_port", {})
+            moved = 0
+            for md in result.mac_entries:
+                old_idx = prev_mac_port.get(md.mac_address)
+                if (old_idx is not None and old_idx != md.port_index
+                        and _access_port(md.port_index) and _access_port(old_idx)
+                        and len(by_mac.get(md.mac_address, ())) < 2
+                        and not _recent_event_exists("mac_moved", device_id, 24, md.mac_address)):
+                    events.append(Event(
+                        device_id=device_id, event_type="mac_moved",
+                        detail=f"{md.mac_address} moved from port {port_names.get(old_idx, old_idx)} "
+                               f"to port {port_names.get(md.port_index, md.port_index)}",
+                        created_at=now,
+                    ))
+                    moved += 1
+                    if moved >= 10:
+                        break
 
         # ── MAC address changes ────────────────────────────────────────────
         # Individual MAC events are too noisy (DHCP churn, sleeping clients, etc.)
@@ -975,7 +1109,8 @@ def _generate_events(
 
     # Fire alerts for high-signal events (device status changes only — not MAC churn)
     alert_event_types = {"device_up", "device_down", "device_degraded",
-                         "device_rebooted", "fan_failure", "psu_failure", "high_cpu"}
+                         "device_rebooted", "fan_failure", "psu_failure", "high_cpu",
+                         "slow_snmp", "temp_rising", "broadcast_storm", "mac_duplicate"}
     for ev in events:
         if ev.event_type in alert_event_types:
             send_alert(device_id, device_name, ev.event_type, ev.detail or "")
@@ -995,5 +1130,8 @@ def _generate_events(
                 db.query(Event).filter(Event.id <= cutoff_id).delete()
         for ev in events:
             db.add(ev)
+        if reboot_uptime_before_s is not None:
+            db.add(DeviceReboot(device_id=device_id,
+                                uptime_before_s=reboot_uptime_before_s, detected_at=now))
         db.commit()
         logger.debug("Generated %d event(s) for device %d", len(events), device_id)

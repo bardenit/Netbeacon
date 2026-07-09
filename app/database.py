@@ -86,6 +86,9 @@ def _migrate():
         "ALTER TABLE devices ADD COLUMN poe_used_w INTEGER",
         "ALTER TABLE devices ADD COLUMN stp_top_changes BIGINT",
         "ALTER TABLE devices ADD COLUMN vitals_updated_at DATETIME",
+        "ALTER TABLE devices ADD COLUMN poll_rtt_ms INTEGER",
+        "ALTER TABLE ports ADD COLUMN rx_broadcast BIGINT",
+        "ALTER TABLE port_stats ADD COLUMN rx_broadcast BIGINT",
         "CREATE INDEX IF NOT EXISTS ix_neighbors_local_port_id ON neighbors (local_port_id)",
         "CREATE INDEX IF NOT EXISTS ix_port_vlans_vlan_id ON port_vlans (vlan_id)",
     ]

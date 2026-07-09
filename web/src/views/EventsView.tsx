@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Bell, Clock, Info, AlertTriangle, CheckCircle2, Trash2, CheckCircle, Zap, RefreshCw, Cpu, GitMerge } from 'lucide-react';
+import { Bell, Clock, Info, AlertTriangle, CheckCircle2, Trash2, CheckCircle, Zap, RefreshCw, Cpu, GitMerge, Thermometer, Radio, Copy, ArrowRight } from 'lucide-react';
 import { formatIsoDate } from '../utils';
 
 interface Event {
@@ -129,6 +129,11 @@ const EVENT_TYPE_ICONS: Record<string, JSX.Element> = {
   psu_recovered: <CheckCircle2 className="w-4 h-4" />,
   high_cpu: <Cpu className="w-4 h-4" />,
   stp_topology_change: <GitMerge className="w-4 h-4" />,
+  slow_snmp: <Clock className="w-4 h-4" />,
+  temp_rising: <Thermometer className="w-4 h-4" />,
+  broadcast_storm: <Radio className="w-4 h-4" />,
+  mac_duplicate: <Copy className="w-4 h-4" />,
+  mac_moved: <ArrowRight className="w-4 h-4" />,
 };
 
 const EVENT_TYPE_COLORS: Record<string, string> = {
@@ -141,6 +146,11 @@ const EVENT_TYPE_COLORS: Record<string, string> = {
   psu_recovered: 'bg-green/10 text-green',
   high_cpu: 'bg-red/10 text-red',
   stp_topology_change: 'bg-yellow/10 text-yellow',
+  slow_snmp: 'bg-yellow/10 text-yellow',
+  temp_rising: 'bg-red/10 text-red',
+  broadcast_storm: 'bg-red/10 text-red',
+  mac_duplicate: 'bg-red/10 text-red',
+  mac_moved: 'bg-blue/10 text-blue',
 };
 
 function getEventIcon(type: string) {

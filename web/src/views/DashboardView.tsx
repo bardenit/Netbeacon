@@ -101,6 +101,18 @@ interface SwitchVitals {
   poe_used_w?: number;
   stp_top_changes?: number;
   vitals_updated_at?: string;
+  poll_rtt_ms?: number | null;
+  rtt_median_24h_ms?: number | null;
+  reboots_90d?: number;
+  last_reboot_at?: string | null;
+}
+
+interface DeviceHistoryPoint {
+  sampled_at: string;
+  cpu_util: number | null;
+  mem_used_pct: number | null;
+  temperature: number | null;
+  poll_rtt_ms: number | null;
 }
 
 interface SubnetUtil {
@@ -158,6 +170,9 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
   const [newDevices, setNewDevices] = useState<NewDevice[]>([]);
   const [portHealth, setPortHealth] = useState<PortHealthEntry[]>([]);
   const [vitals, setVitals] = useState<SwitchVitals[]>([]);
+  const [expandedVitals, setExpandedVitals] = useState<number | null>(null);
+  const [vitalsHistoryCache, setVitalsHistoryCache] = useState<Record<number, DeviceHistoryPoint[]>>({});
+  const [vitalsHistoryLoading, setVitalsHistoryLoading] = useState<number | null>(null);
   const [subnetUtils, setSubnetUtils] = useState<SubnetUtil[]>([]);
   const [darkPorts, setDarkPorts] = useState<DarkPort[]>([]);
   const [departedDevices, setDepartedDevices] = useState<DepartedDevice[]>([]);
@@ -253,8 +268,29 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
 
   const vitalsWarnCount = useMemo(() => vitals.filter(v =>
     (v.cpu_util ?? 0) >= 90 || (v.mem_used_pct ?? 0) >= 90 || (v.temperature ?? 0) >= 95 ||
-    v.fans_ok === false || v.psu_ok === false
+    v.fans_ok === false || v.psu_ok === false ||
+    (v.reboots_90d ?? 0) > 0 || rttHeat(v.poll_rtt_ms, v.rtt_median_24h_ms) === 'red'
   ).length, [vitals]);
+
+  async function toggleVitalsRow(deviceId: number) {
+    if (expandedVitals === deviceId) {
+      setExpandedVitals(null);
+      return;
+    }
+    setExpandedVitals(deviceId);
+    if (!vitalsHistoryCache[deviceId]) {
+      setVitalsHistoryLoading(deviceId);
+      try {
+        const res = await apiFetch(`/api/dashboard/device-history/${deviceId}?hours=24`);
+        const data = await res.json();
+        setVitalsHistoryCache(prev => ({ ...prev, [deviceId]: Array.isArray(data) ? data : [] }));
+      } catch {
+        setVitalsHistoryCache(prev => ({ ...prev, [deviceId]: [] }));
+      } finally {
+        setVitalsHistoryLoading(null);
+      }
+    }
+  }
 
   function handleSort(k: string) {
     if (sortKey === k) setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
@@ -457,15 +493,24 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                     <th className="px-4 py-3 text-left">Temp</th>
                     <th className="px-4 py-3 text-left">Fan / PSU</th>
                     <th className="px-4 py-3 text-left">PoE</th>
+                    <th className="px-4 py-3 text-left">SNMP RTT</th>
+                    <th className="px-4 py-3 text-left">Reboots 90d</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {visibleVitals.map((v) => (
-                    <tr key={v.device_id} className="hover:bg-accent/5 transition-colors">
+                  {visibleVitals.map((v) => {
+                    const heat = rttHeat(v.poll_rtt_ms, v.rtt_median_24h_ms);
+                    const isExpanded = expandedVitals === v.device_id;
+                    return (
+                    <React.Fragment key={v.device_id}>
+                    <tr className="hover:bg-accent/5 transition-colors cursor-pointer" onClick={() => toggleVitalsRow(v.device_id)}>
                       <td className="px-4 py-3 text-xs">
-                        <button onClick={() => onJumpToFaceplate(v.device_id)} className="text-left hover:underline group">
-                          <span className="font-medium text-white group-hover:text-accent transition-colors">{v.hostname}</span>
-                        </button>
+                        <div className="flex items-center gap-1">
+                          {isExpanded ? <ChevronDown className="w-3.5 h-3.5 text-text2 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 text-text2 shrink-0" />}
+                          <button onClick={(e) => { e.stopPropagation(); onJumpToFaceplate(v.device_id); }} className="text-left hover:underline group">
+                            <span className="font-medium text-white group-hover:text-accent transition-colors">{v.hostname}</span>
+                          </button>
+                        </div>
                         {v.poll_status === 'error' && (
                           <div className="mt-1"><span className="px-2 py-0.5 bg-red/20 text-red text-[10px] font-bold rounded">ERROR</span></div>
                         )}
@@ -502,8 +547,29 @@ export default function DashboardView({ apiFetch, onJumpToFaceplate, onSearch, s
                           </div>
                         ) : <span className="text-text2">—</span>}
                       </td>
+                      <td className="px-4 py-3 text-xs">
+                        <span className={`font-bold ${heat === 'red' ? 'text-red' : heat === 'yellow' ? 'text-yellow' : 'text-text2'}`}>
+                          {v.poll_rtt_ms != null ? `${v.poll_rtt_ms} ms` : '—'}
+                        </span>
+                        {v.rtt_median_24h_ms != null && <div className="text-[10px] text-text2">~{v.rtt_median_24h_ms} ms</div>}
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        <span className={`font-bold ${(v.reboots_90d ?? 0) > 0 ? 'text-red' : 'text-green'}`}>{v.reboots_90d ?? 0}</span>
+                        {(v.reboots_90d ?? 0) > 0 && v.last_reboot_at && <div className="text-[10px] text-text2">{relativeTime(v.last_reboot_at)}</div>}
+                      </td>
                     </tr>
-                  ))}
+                    {isExpanded && (
+                      <tr className="bg-surface2/40">
+                        <td colSpan={9} className="px-4 py-2">
+                          {vitalsHistoryLoading === v.device_id
+                            ? <div className="text-xs text-text2 py-2">Loading…</div>
+                            : <VitalsSparklines history={vitalsHistoryCache[v.device_id] || []} />}
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -985,6 +1051,64 @@ function humanizeUptime(seconds?: number | null): string {
   const mins = Math.floor((seconds % 3600) / 60);
   if (hours > 0) return `${hours}h ${mins}m`;
   return `${mins}m`;
+}
+
+function rttHeat(pollRttMs?: number | null, medianMs?: number | null): 'red' | 'yellow' | null {
+  if (pollRttMs == null) return null;
+  if (medianMs != null) {
+    if (pollRttMs > Math.max(500, 5 * medianMs)) return 'red';
+    if (pollRttMs > 2 * medianMs) return 'yellow';
+    return null;
+  }
+  return pollRttMs > 2000 ? 'red' : null;
+}
+
+const SPARKLINE_SERIES = [
+  { key: 'cpu_util', label: 'CPU %', color: 'text-accent2' },
+  { key: 'mem_used_pct', label: 'Mem %', color: 'text-accent' },
+  { key: 'temperature', label: 'Temp °C', color: 'text-yellow' },
+  { key: 'poll_rtt_ms', label: 'RTT ms', color: 'text-green' },
+] as const;
+
+function VitalsSparklines({ history }: { history: DeviceHistoryPoint[] }) {
+  const series = SPARKLINE_SERIES.map(s => ({
+    ...s,
+    points: history.map(h => h[s.key as keyof DeviceHistoryPoint]).filter((v): v is number => v != null),
+  })).filter(s => s.points.length >= 2);
+
+  if (series.length === 0) {
+    return <div className="text-xs text-text2 py-2">No history yet</div>;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-5 py-2">
+      {series.map(s => (
+        <div key={s.label} className="flex flex-col gap-1">
+          <div className="text-[10px] font-bold text-text2 uppercase tracking-wider">
+            {s.label}{' '}
+            <span className="font-normal normal-case">
+              min {Math.min(...s.points).toFixed(0)} / max {Math.max(...s.points).toFixed(0)}
+            </span>
+          </div>
+          <Sparkline points={s.points} colorClass={s.color} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Sparkline({ points, colorClass }: { points: number[], colorClass: string }) {
+  const w = 140, h = 36;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const range = max - min || 1;
+  const step = w / (points.length - 1);
+  const coords = points.map((p, i) => `${(i * step).toFixed(1)},${(h - ((p - min) / range) * h).toFixed(1)}`).join(' ');
+  return (
+    <svg width={w} height={h} className={colorClass}>
+      <polyline points={coords} fill="none" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  );
 }
 
 function VitalChip({ label, ok }: { label: string, ok?: boolean | null }) {

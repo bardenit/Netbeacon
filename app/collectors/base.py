@@ -62,6 +62,7 @@ OID_IF_NAME         = "1.3.6.1.2.1.31.1.1.1.1"
 OID_IF_ALIAS        = "1.3.6.1.2.1.31.1.1.1.18"
 OID_IF_HC_IN        = "1.3.6.1.2.1.31.1.1.1.6"
 OID_IF_HC_OUT       = "1.3.6.1.2.1.31.1.1.1.10"
+OID_IF_HC_IN_BCAST  = "1.3.6.1.2.1.31.1.1.1.9"
 
 # LLDP-MIB
 OID_LLDP_REM_CHASSIS_ID = "1.0.8802.1.1.2.1.4.1.1.4"
@@ -117,6 +118,7 @@ class PortData:
     tx_discards: int | None = None
     duplex: int | None = None
     if_last_change: int | None = None
+    rx_broadcast: int | None = None
     stp_state: int | None = None
     poe_draw_mw: int | None = None
 
@@ -178,6 +180,7 @@ class CollectorResult:
     poe_budget_w: int | None = None
     poe_used_w: int | None = None
     stp_top_changes: int | None = None
+    poll_rtt_ms: int | None = None      # set by scheduler, status polls only
 
 
 # ── SNMP helpers ──────────────────────────────────────────────────────────────
@@ -585,6 +588,7 @@ class BaseCollector:
             (OID_IF_IN_DISCARDS, "rx_discards"),
             (OID_IF_OUT_DISCARDS, "tx_discards"),
             (OID_IF_LAST_CHANGE, "if_last_change"),
+            (OID_IF_HC_IN_BCAST, "rx_broadcast"),
         ):
             try:
                 for oid, val in (await self._walk(base_oid)).items():

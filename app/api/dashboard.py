@@ -10,7 +10,8 @@ from fastapi import APIRouter, Depends, Query
 logger = logging.getLogger(__name__)
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import ArpEntry, Device, MacEntry, Neighbor, Port, PortStat, Subnet, Vlan, is_fortigate
+from app.models import (ArpEntry, Device, DeviceReboot, DeviceStat, MacEntry, Neighbor,
+                        Port, PortStat, Subnet, Vlan, is_fortigate)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -378,9 +379,30 @@ def port_health(db: Session = Depends(get_db)):
 @router.get("/vitals")
 def switch_vitals(db: Session = Depends(get_db)):
     """Per-switch hardware/health vitals (CPU, memory, temperature, fans, PSU, PoE, uptime)."""
+    from sqlalchemy import func as sqlfunc
+    day_ago = datetime.utcnow() - timedelta(hours=24)
+    ninety_days = datetime.utcnow() - timedelta(days=90)
+
+    # 24h RTT medians per device (one query, grouped in python)
+    rtt_samples: dict[int, list[int]] = {}
+    for dev_id, rtt in db.query(DeviceStat.device_id, DeviceStat.poll_rtt_ms).filter(
+            DeviceStat.poll_rtt_ms.isnot(None), DeviceStat.sampled_at >= day_ago).all():
+        rtt_samples.setdefault(dev_id, []).append(rtt)
+
+    reboot_counts = dict(db.query(DeviceReboot.device_id, sqlfunc.count(DeviceReboot.id))
+                         .filter(DeviceReboot.detected_at >= ninety_days)
+                         .group_by(DeviceReboot.device_id).all())
+    last_reboots = dict(db.query(DeviceReboot.device_id, sqlfunc.max(DeviceReboot.detected_at))
+                        .group_by(DeviceReboot.device_id).all())
+
     out = []
     for d in db.query(Device).order_by(Device.hostname).all():
+        samples = sorted(rtt_samples.get(d.id, []))
         out.append({
+            "poll_rtt_ms": d.poll_rtt_ms,
+            "rtt_median_24h_ms": samples[len(samples) // 2] if samples else None,
+            "reboots_90d": reboot_counts.get(d.id, 0),
+            "last_reboot_at": last_reboots.get(d.id),
             "device_id": d.id,
             "hostname": d.hostname,
             "ip_address": d.ip_address,
@@ -397,6 +419,26 @@ def switch_vitals(db: Session = Depends(get_db)):
             "vitals_updated_at": d.vitals_updated_at,
         })
     return out
+
+
+@router.get("/device-history/{device_id}")
+def device_history(device_id: int, hours: int = Query(default=24, ge=1, le=168),
+                   db: Session = Depends(get_db)):
+    """Vitals time series for one device (CPU/mem/temp from full polls, RTT from status polls)."""
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    return [
+        {
+            "sampled_at": s.sampled_at,
+            "cpu_util": s.cpu_util,
+            "mem_used_pct": s.mem_used_pct,
+            "temperature": s.temperature,
+            "poll_rtt_ms": s.poll_rtt_ms,
+        }
+        for s in db.query(DeviceStat)
+        .filter(DeviceStat.device_id == device_id, DeviceStat.sampled_at >= cutoff)
+        .order_by(DeviceStat.sampled_at.asc())
+        .limit(2000)
+    ]
 
 
 @router.get("/subnet-utilization")

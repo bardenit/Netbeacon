@@ -50,6 +50,7 @@ class Device(Base):
     poe_used_w = Column(Integer, nullable=True)        # PSE power consumed (W)
     stp_top_changes = Column(BigInteger, nullable=True)  # dot1dStpTopChanges counter
     vitals_updated_at = Column(DateTime, nullable=True)
+    poll_rtt_ms = Column(Integer, nullable=True)         # SNMP response time, status polls only
 
     ports = relationship("Port", back_populates="device", cascade="all, delete-orphan")
     vlans = relationship("Vlan", back_populates="device", cascade="all, delete-orphan")
@@ -97,6 +98,7 @@ class Port(Base):
     last_error_at = Column(DateTime, nullable=True)    # last poll where error counters increased
     last_discard_at = Column(DateTime, nullable=True)  # last poll where discard counters increased
     stp_state = Column(Integer, nullable=True)         # 1=disabled,2=blocking,3=listening,4=learning,5=forwarding,6=broken
+    rx_broadcast = Column(BigInteger, nullable=True)   # ifHCInBroadcastPkts counter
     last_seen = Column(DateTime, default=datetime.utcnow)
     last_mac = Column(String, nullable=True)           # last MAC seen on this port
     last_hostname = Column(String, nullable=True)      # hostname of last connected device
@@ -226,7 +228,29 @@ class PortStat(Base):
     tx_errors = Column(BigInteger, nullable=True)
     rx_discards = Column(BigInteger, nullable=True)
     tx_discards = Column(BigInteger, nullable=True)
+    rx_broadcast = Column(BigInteger, nullable=True)
     sampled_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class DeviceStat(Base):
+    """Time-series vitals samples: cpu/mem/temp from full polls, RTT from status polls."""
+    __tablename__ = "device_stats"
+    id = Column(Integer, primary_key=True, index=True)
+    device_id = Column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
+    cpu_util = Column(Integer, nullable=True)
+    mem_used_pct = Column(Integer, nullable=True)
+    temperature = Column(Integer, nullable=True)
+    poll_rtt_ms = Column(Integer, nullable=True)
+    sampled_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class DeviceReboot(Base):
+    """Durable reboot log (events get pruned; this doesn't)."""
+    __tablename__ = "device_reboots"
+    id = Column(Integer, primary_key=True, index=True)
+    device_id = Column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
+    uptime_before_s = Column(BigInteger, nullable=True)  # seconds of uptime lost
+    detected_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 class Subnet(Base):
