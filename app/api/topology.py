@@ -180,11 +180,18 @@ def get_topology(db: Session = Depends(get_db)):
     return TopologyGraph(nodes=nodes, edges=edges)
 
 
+_background_tasks: set = set()
+
+
 @router.post("/poll", status_code=202)
 async def poll_all(db: Session = Depends(get_db)):
     import asyncio
     from app.scheduler import poll_all_devices
-    asyncio.create_task(poll_all_devices())
+    # Keep a strong reference until done — an unreferenced task can be
+    # garbage-collected mid-run, silently aborting the poll.
+    task = asyncio.create_task(poll_all_devices())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"message": "Poll triggered for all devices"}
 
 

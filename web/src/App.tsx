@@ -66,6 +66,7 @@ export default function App() {
   const [subnets, setSubnets] = useState<SubnetDef[]>([]);
   const [labels, setLabels] = useState<Map<string, LabelEntry>>(new Map());
   const [labelPrefill, setLabelPrefill] = useState<string | null>(null);
+  const [pollState, setPollState] = useState<{ status: 'idle' | 'polling' | 'success' | 'error'; message?: string }>({ status: 'idle' });
 
   useEffect(() => {
     // Apply theme on load
@@ -148,6 +149,22 @@ export default function App() {
       setStatus(data);
     } catch (e) {
       console.error("Failed to fetch status", e);
+    }
+  };
+
+  const handlePollAll = async () => {
+    setPollState({ status: 'polling' });
+    try {
+      const res = await apiFetch('/api/poll', { method: 'POST' });
+      if (!res.ok) {
+        setPollState({ status: 'error', message: `Poll failed (HTTP ${res.status})` });
+        return;
+      }
+      setPollState({ status: 'success', message: 'Poll started' });
+      fetchStatus();
+      setTimeout(() => setPollState(s => (s.status === 'success' ? { status: 'idle' } : s)), 4000);
+    } catch (e) {
+      setPollState({ status: 'error', message: e instanceof Error ? e.message : 'Poll failed' });
     }
   };
 
@@ -315,14 +332,20 @@ export default function App() {
 
       {/* Toolbar */}
       <div className="flex items-center gap-3 px-5 py-2 bg-surface2 border-b border-border flex-shrink-0 z-30">
-        <button 
-          onClick={async () => { await apiFetch('/api/poll', { method: 'POST' }); fetchStatus(); }}
-          className="flex items-center gap-2 px-3.5 py-1.5 bg-accent text-white rounded-md text-xs font-bold uppercase tracking-wide hover:opacity-90 transition-opacity shadow-lg shadow-accent/20"
+        <button
+          onClick={handlePollAll}
+          disabled={pollState.status === 'polling'}
+          className="flex items-center gap-2 px-3.5 py-1.5 bg-accent text-white rounded-md text-xs font-bold uppercase tracking-wide hover:opacity-90 transition-opacity shadow-lg shadow-accent/20 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          <RefreshCw className="w-3.5 h-3.5" />
-          Poll All Now
+          <RefreshCw className={`w-3.5 h-3.5 ${pollState.status === 'polling' ? 'animate-spin' : ''}`} />
+          {pollState.status === 'polling' ? 'Polling...' : 'Poll All Now'}
         </button>
-        <button 
+        {pollState.status !== 'idle' && pollState.message && (
+          <span className={`text-xs font-medium ${pollState.status === 'error' ? 'text-red-400' : 'text-text2'}`}>
+            {pollState.message}
+          </span>
+        )}
+        <button
           onClick={() => { setRefreshKey(k => k + 1); fetchStatus(); fetchTopology(); }}
           className="px-3.5 py-1.5 bg-surface border border-border text-text2 rounded-md text-xs font-bold uppercase tracking-wide hover:text-white hover:border-accent transition-all"
         >
@@ -354,7 +377,7 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 overflow-hidden relative bg-bg">
         {activeTab === 'macnames' && <MacNamesView apiFetch={apiFetch} prefillMac={labelPrefill} onPrefillConsumed={() => setLabelPrefill(null)} onLabelsChanged={refreshLabels} onSearch={(q) => { setGlobalSearch(q); setActiveTab('search'); }} refreshKey={refreshKey} />}
-        {activeTab === 'topology' && <TopologyView apiFetch={apiFetch} onJumpToFaceplate={handleJumpToFaceplate} />}
+        {activeTab === 'topology' && <TopologyView apiFetch={apiFetch} onJumpToFaceplate={handleJumpToFaceplate} refreshKey={refreshKey} />}
         {activeTab === 'faceplate' && <FaceplateView initialParams={jumpParams} onParamsConsumed={() => setJumpParams(null)} apiFetch={apiFetch} subnets={subnets} labels={labels} onLabelMac={handleLabelMac} refreshKey={refreshKey} onNavChange={handleFaceplateNavChange} />}
         {activeTab === 'search' && <SearchView onJumpToFaceplate={handleJumpToFaceplate} topologyData={topologyData} apiFetch={apiFetch} globalQuery={globalSearch} subnets={subnets} labels={labels} onLabelMac={handleLabelMac} />}
         {activeTab === 'dashboard' && <DashboardView apiFetch={apiFetch} onJumpToFaceplate={handleJumpToFaceplate} onSearch={(q) => { setGlobalSearch(q); setActiveTab('search'); }} subnets={subnets} refreshKey={refreshKey} />}

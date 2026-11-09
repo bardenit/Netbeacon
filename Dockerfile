@@ -9,6 +9,12 @@ RUN npm run build
 # ── Stage 2: Final Runtime ───────────────────────────────────────────────────
 FROM python:3.12-alpine AS runtime
 
+LABEL org.opencontainers.image.title="NetBeacon" \
+      org.opencontainers.image.description="Network topology mapper and L2/L3 visibility tool (SNMP)" \
+      org.opencontainers.image.authors="Jason Barden <jason.barden@gmail.com>" \
+      org.opencontainers.image.source="https://github.com/bardenit/Netbeacon" \
+      org.opencontainers.image.vendor="Jason Barden"
+
 WORKDIR /app
 
 # Create a non-privileged user (Alpine syntax)

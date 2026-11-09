@@ -32,9 +32,10 @@ interface TopologyData {
   edges: Edge[];
 }
 
-export default function TopologyView({ apiFetch, onJumpToFaceplate }: {
+export default function TopologyView({ apiFetch, onJumpToFaceplate, refreshKey }: {
   apiFetch: (url: string, options?: any) => Promise<Response>;
   onJumpToFaceplate: (deviceId: number) => void;
+  refreshKey?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const networkRef = useRef<VisNetwork | null>(null);
@@ -72,7 +73,7 @@ export default function TopologyView({ apiFetch, onJumpToFaceplate }: {
 
   useEffect(() => {
     fetchTopology();
-  }, []);
+  }, [refreshKey]);
 
   const sites = useMemo(() => {
     const s = new Set(data.nodes.map(n => n.site).filter(Boolean));

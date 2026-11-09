@@ -19,3 +19,6 @@ web/dist/
 # OS
 .DS_Store
 .env
+
+# Claude Code local state
+.claude/

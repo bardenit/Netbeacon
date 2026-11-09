@@ -45,6 +45,12 @@ _executor = ThreadPoolExecutor(max_workers=10)
 _last_poll_time: datetime | None = None       # last FULL poll cycle
 _last_status_poll_time: datetime | None = None
 _poll_lock = asyncio.Lock()
+# Cap how many devices are actively mid-SNMP-collection at once. Without this,
+# a full cycle fires every device's ~25-call burst simultaneously, which can
+# overload a switch's management CPU (or a shared uplink) enough that it starts
+# dropping/delaying SNMP responses — showing up as devices flapping online/offline
+# even though they're reachable fine over their web UI.
+_snmp_concurrency = asyncio.Semaphore(4)
 
 
 def _intervals() -> dict[str, int]:
@@ -168,26 +174,33 @@ async def poll_all_devices():
     global _last_poll_time, _last_status_poll_time
 
     async with _poll_lock:
-        _last_poll_time = datetime.utcnow()
-        _last_status_poll_time = _last_poll_time  # a full poll includes status data
-        logger.info("=== Poll cycle started at %s ===", _last_poll_time.isoformat())
+        try:
+            _last_poll_time = datetime.utcnow()
+            _last_status_poll_time = _last_poll_time  # a full poll includes status data
+            logger.info("=== Poll cycle started at %s ===", _last_poll_time.isoformat())
 
-        with SessionLocal() as db:
-            devices = db.query(Device).all()
+            with SessionLocal() as db:
+                devices = db.query(Device).all()
 
-        if not devices:
-            logger.info("No devices configured — nothing to poll")
-            return
+            if not devices:
+                logger.info("No devices configured — nothing to poll")
+                return
 
-        tasks = [poll_device(device.id) for device in devices]
-        await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [poll_device(device.id) for device in devices]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Global prune once per poll cycle to keep DB lean
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(_executor, _prune_stale_data)
+            # Global prune once per poll cycle to keep DB lean
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(_executor, _prune_stale_data)
+            except Exception:
+                logger.exception("Prune step failed — poll results are still valid")
 
-        logger.info("=== Poll cycle complete ===")
-    stream.publish({"type": "cycle_complete", "scope": "full"})
+            logger.info("=== Poll cycle complete ===")
+        finally:
+            # Always notify listeners, even on an empty device list or an
+            # unexpected exception above, so the UI never gets stuck waiting.
+            stream.publish({"type": "cycle_complete", "scope": "full"})
 
 
 async def poll_all_status():
@@ -435,7 +448,16 @@ async def poll_device(device_id: int) -> bool:
         collector = collector_class(host=host, community=community, version=version,
                                     v3_params=v3_params)
 
-        result: CollectorResult = await collector.collect()
+        # A single unresponsive device can otherwise stall the whole cycle for
+        # many minutes — collect() makes ~25 sequential SNMP calls that each
+        # retry independently, so per-call timeouts alone don't bound the total.
+        # Every poll runs under the shared _poll_lock, so an unbounded device
+        # here freezes "last poll time" for everyone until it finally gives up.
+        # 180s gives busy/core switches with large FDB & ARP tables enough
+        # headroom to finish for real — a tighter cap flags healthy-but-slow
+        # devices as offline.
+        async with _snmp_concurrency:
+            result: CollectorResult = await asyncio.wait_for(collector.collect(), timeout=180)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(_executor, _persist_result, device_id, result)
 

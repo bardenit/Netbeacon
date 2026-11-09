@@ -2,6 +2,7 @@
   "name": "netbeacon-ui",
   "private": true,
   "version": "1.0.0",
+  "author": "Jason Barden <jason.barden@gmail.com>",
   "type": "module",
   "scripts": {
     "dev": "vite",

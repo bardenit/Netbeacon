@@ -395,11 +395,18 @@ class BaseCollector:
             result.partial = True
 
         # Collect bridge port -> ifIndex map early — used by FDB and VLAN
+        # Small pacing gap between phases — each phase is itself several SNMP
+        # calls, and firing all ~25 back-to-back with zero gap can overrun a
+        # weak switch management CPU's request queue, causing it to start
+        # dropping/delaying responses mid-poll (looks like flapping online/offline).
+        pace = lambda: asyncio.sleep(0.15)
+
         try:
             await self._collect_bridge_port_map(result)
             log.debug("Bridge port map: %d entries", len(result.bridge_to_ifindex))
         except Exception as e:
             log.debug("Bridge port map failed (non-fatal): %s", e)
+        await pace()
 
         try:
             await self._collect_interfaces(result)
@@ -408,6 +415,7 @@ class BaseCollector:
             log.error("Interface collection failed: %s", e)
             result.errors.append(f"interfaces: {e}")
             result.partial = True
+        await pace()
 
         try:
             await self._collect_lldp(result)
@@ -416,6 +424,7 @@ class BaseCollector:
             log.warning("LLDP collection failed (non-fatal): %s", e)
             result.errors.append(f"lldp: {e}")
             result.partial = True
+        await pace()
 
         try:
             await self._collect_vlans(result)
@@ -424,6 +433,7 @@ class BaseCollector:
             log.warning("VLAN collection failed (non-fatal): %s", e)
             result.errors.append(f"vlans: {e}")
             result.partial = True
+        await pace()
 
         try:
             await self._collect_fdb(result)
@@ -432,22 +442,26 @@ class BaseCollector:
             log.warning("FDB collection failed (non-fatal): %s", e)
             result.errors.append(f"fdb: {e}")
             result.partial = True
+        await pace()
 
         try:
             await self._collect_arp(result)
             log.info("Collected %d ARP entries", len(result.arp_entries))
         except Exception as e:
             log.debug("ARP collection failed (non-fatal): %s", e)
+        await pace()
 
         try:
             await self._collect_poe(result)
         except Exception as e:
             logger.debug("PoE collection failed (non-fatal): %s", e)
+        await pace()
 
         try:
             await self._collect_stp(result)
         except Exception as e:
             logger.debug("STP collection failed (non-fatal): %s", e)
+        await pace()
 
         try:
             await self._collect_vitals(result)
